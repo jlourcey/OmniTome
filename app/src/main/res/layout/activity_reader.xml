@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    activity_reader.xml — the only layout file in the project.
+
+    This is a single FrameLayout that acts as a container for two layers:
+
+    Layer 1 (bottom): EpubNavigatorFragment
+      Readium fills this FrameLayout with a WebView that renders the EPUB.
+      It is added programmatically in ReaderActivity via supportFragmentManager.
+
+    Layer 2 (top): ComposeView (the HUD)
+      A transparent ComposeView is added on top by ReaderActivity.attachHud().
+      It contains ReaderControlsHud — the tap-to-show controls overlay.
+
+    Why XML instead of Compose here?
+      Readium's EpubNavigatorFragment is a traditional Fragment and must be
+      placed inside a ViewGroup in an XML layout. Everything else in the app
+      is pure Compose.
+-->
+<FrameLayout
+    xmlns:android="http://schemas.android.com/apk/res/android"
+    android:id="@+id/reader_container"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:background="@android:color/transparent" />

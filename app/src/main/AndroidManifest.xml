@@ -1,0 +1,143 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <!-- ── Permissions ───────────────────────────────────────────────────── -->
+
+    <!-- Required to reach your Calibre server on the local network -->
+    <uses-permission android:name="android.permission.INTERNET" />
+
+    <!-- Required to detect when the network comes back online after sync fails -->
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+
+    <!-- Required to store downloaded EPUB/PDF files on the device -->
+    <!-- On API 29+ scoped storage handles this automatically; kept for API 26-28 -->
+    <uses-permission
+        android:name="android.permission.WRITE_EXTERNAL_STORAGE"
+        android:maxSdkVersion="28" />
+
+    <!-- Required by WorkManager for long-running background sync -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
+
+    <!-- ── Application ───────────────────────────────────────────────────── -->
+
+    <application
+        android:name=".EReaderApplication"
+        android:allowBackup="true"
+        android:networkSecurityConfig="@xml/network_security_config"
+        android:icon="@mipmap/ic_launcher"
+        android:label="@string/app_name"
+        android:roundIcon="@mipmap/ic_launcher_round"
+        android:supportsRtl="true"
+        android:theme="@style/Theme.EReader"
+        android:enableOnBackInvokedCallback="true"
+        android:hardwareAccelerated="true"
+        android:largeHeap="true">
+
+        <!-- ── Main entry point ──────────────────────────────────────────── -->
+        <!--
+            Theme.EReader.Splash → sets the Android 12+ system launch screen to
+            navy background + OmniTome wordmark. postSplashScreenTheme switches
+            back to Theme.EReader once the app is ready to draw.
+            See themes.xml and MainActivity.installSplashScreen() for details.
+        -->
+        <activity
+            android:name=".MainActivity"
+            android:exported="true"
+            android:theme="@style/Theme.EReader.Splash"
+            android:windowSoftInputMode="adjustResize"
+            android:configChanges="orientation|screenSize|screenLayout|keyboardHidden|smallestScreenSize">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+
+        <!-- ── Reader activity ───────────────────────────────────────────── -->
+        <!-- keepScreenOn and fullscreen are set programmatically in ReaderActivity -->
+        <activity
+            android:name=".ui.reader.ReaderActivity"
+            android:exported="false"
+            android:configChanges="orientation|screenSize|screenLayout"
+            android:windowSoftInputMode="adjustNothing" />
+
+        <!-- ── File-open router ──────────────────────────────────────────── -->
+        <!--
+            FileImportActivity is the ONLY exported entry point for file opening.
+            When the user taps "Open with OmniTome" from Downloads, a file manager,
+            or an email attachment, Android routes the intent here.
+
+            This activity:
+              1. Copies the EPUB/PDF into app-private storage (same as Local tab import)
+              2. Extracts metadata (title, author, cover) for EPUBs
+              3. Saves the book to the library database
+              4. Opens ReaderActivity with the new book's ID
+              5. Finishes itself — it has no UI and never appears in Recents
+
+            ReaderActivity stays unexported (android:exported="false") so external
+            apps can never bypass this import step and reach the reader directly.
+
+            excludeFromRecents="true": the shim itself won't appear in the Recents
+            app switcher. The reader it launches WILL appear normally.
+        -->
+        <activity
+            android:name=".FileImportActivity"
+            android:exported="true"
+            android:excludeFromRecents="true"
+            android:theme="@style/Theme.EReader">
+
+            <!-- EPUB — standard MIME type used by Chrome, most browsers, and email clients -->
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:mimeType="application/epub+zip" />
+            </intent-filter>
+
+            <!-- EPUB — alternate MIME type sent by some older servers and apps -->
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:mimeType="application/epub" />
+            </intent-filter>
+
+            <!-- PDF — standard MIME type, recognised universally -->
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:mimeType="application/pdf" />
+            </intent-filter>
+
+        </activity>
+
+        <!-- ── WorkManager provider (required for background sync) ───────── -->
+        <provider
+            android:name="androidx.startup.InitializationProvider"
+            android:authorities="${applicationId}.androidx-startup"
+            android:exported="false"
+            tools:node="merge"
+            xmlns:tools="http://schemas.android.com/tools">
+            <meta-data
+                android:name="androidx.work.WorkManagerInitializer"
+                android:value="androidx.startup" />
+        </provider>
+
+        <!-- ── FileProvider (shares exported PDF notes via the share sheet) ─ -->
+        <!--
+            authority must match the string used in AnnotationPdfExporter:
+              "${context.packageName}.fileprovider"
+            file_provider_paths.xml declares which cache sub-directories are
+            allowed to be shared.
+        -->
+        <provider
+            android:name="androidx.core.content.FileProvider"
+            android:authorities="${applicationId}.fileprovider"
+            android:exported="false"
+            android:grantUriPermissions="true">
+            <meta-data
+                android:name="android.support.FILE_PROVIDER_PATHS"
+                android:resource="@xml/file_provider_paths" />
+        </provider>
+
+    </application>
+
+</manifest>

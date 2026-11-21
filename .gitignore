@@ -1,0 +1,31 @@
+# ── Gradle ────────────────────────────────────────────────────────────────────
+.gradle/
+build/
+**/build/
+*.hprof
+
+# ── Android Studio ────────────────────────────────────────────────────────────
+.idea/
+*.iml
+local.properties
+captures/
+.externalNativeBuild/
+.cxx/
+
+# ── NEVER commit these — they contain secrets ─────────────────────────────────
+gradle.properties
+# Instead, each developer copies gradle.properties.template and fills in their own values
+# signing credentials — back this up externally
+keystore.properties
+
+# ── Key stores ────────────────────────────────────────────────────────────────
+*.jks
+*.keystore
+
+# ── OS files ──────────────────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+
+# ── Local-only folders ────────────────────────────────────────────────────────
+_backups/
+.kotlin/

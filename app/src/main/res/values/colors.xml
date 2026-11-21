@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!--
+        Deep navy background used by both the Android system launch screen
+        and the in-app animated SplashScreen composable.
+        Matches BgNavy = Color(0xFF060D30) in SplashScreen.kt.
+    -->
+    <color name="splash_bg_navy">#060D30</color>
+</resources>

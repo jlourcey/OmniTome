@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">OmniTome</string>
+
+    <!-- Library screen -->
+    <string name="library_title">OmniTome</string>
+    <string name="search_hint">Title, author, series…</string>
+    <string name="sync_library">Sync Library</string>
+    <string name="empty_library_title">Your library is empty</string>
+    <string name="empty_library_body">Connect your Calibre server or Google Drive, then sync to see your books here.</string>
+
+    <!-- Series -->
+    <string name="series_all">All</string>
+
+    <!-- Reader -->
+    <string name="reader_back">Back to library</string>
+    <string name="reader_toc">Table of contents</string>
+    <string name="reader_bookmarks">Bookmarks</string>
+    <string name="reader_font_size_label">Font Size</string>
+    <string name="reader_theme_label">Theme</string>
+    <string name="reader_font_label">Font</string>
+    <string name="reader_theme_day">Day</string>
+    <string name="reader_theme_sepia">Sepia</string>
+    <string name="reader_theme_night">Night</string>
+
+    <!-- Error messages -->
+    <string name="error_sync_failed">Sync failed. Check your connection and server settings.</string>
+    <string name="error_book_open_failed">Could not open book.</string>
+    <string name="dismiss">Dismiss</string>
+</resources>

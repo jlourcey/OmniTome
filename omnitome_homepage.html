@@ -1,0 +1,170 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>OmniTome — Your Personal Calibre Library Reader</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: Georgia, 'Times New Roman', serif;
+      background: #060D30;
+      color: #E6E4DA;
+      line-height: 1.8;
+      padding: 0 1.5rem;
+    }
+    .wrap { max-width: 760px; margin: 0 auto; padding: 4rem 0 6rem; }
+
+    /* Hero */
+    .hero { text-align: center; padding: 3rem 0 4rem; }
+    .hero h1 {
+      font-size: 3rem;
+      font-weight: normal;
+      color: #DDBB3A;
+      letter-spacing: 0.04em;
+      margin-bottom: 1rem;
+    }
+    .hero .tagline {
+      font-size: 1.2rem;
+      color: rgba(230,228,218,0.7);
+      font-style: italic;
+      margin-bottom: 0.75rem;
+    }
+    .hero .pitch {
+      font-family: 'Helvetica Neue', Arial, sans-serif;
+      font-size: 0.95rem;
+      color: rgba(230,228,218,0.6);
+      max-width: 520px;
+      margin: 0 auto 2.5rem;
+      line-height: 1.7;
+    }
+    .btn {
+      display: inline-block;
+      background: #DDBB3A;
+      color: #060D30;
+      font-family: 'Helvetica Neue', Arial, sans-serif;
+      font-size: 0.85rem;
+      font-weight: 700;
+      letter-spacing: 0.12em;
+      text-transform: uppercase;
+      text-decoration: none;
+      padding: 0.85rem 2.2rem;
+      border-radius: 2px;
+    }
+    .btn:hover { background: #c9a82e; }
+
+    /* Feature image */
+    .feature-img {
+      width: 100%;
+      max-width: 760px;
+      border-radius: 4px;
+      margin: 0 auto 4rem;
+      display: block;
+      border: 1px solid rgba(221,187,58,0.15);
+    }
+
+    /* Selling points */
+    .rule { border: none; border-top: 1px solid rgba(221,187,58,0.2); margin: 2.5rem 0; }
+    .points { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 2rem; margin: 2.5rem 0; }
+    .point h3 {
+      font-family: 'Helvetica Neue', Arial, sans-serif;
+      font-size: 0.8rem;
+      color: #DDBB3A;
+      letter-spacing: 0.12em;
+      text-transform: uppercase;
+      margin-bottom: 0.5rem;
+    }
+    .point p {
+      font-size: 0.9rem;
+      color: rgba(230,228,218,0.7);
+      line-height: 1.7;
+      margin-bottom: 0;
+    }
+
+    /* Features list */
+    h2 {
+      font-size: 1rem;
+      color: #DDBB3A;
+      margin: 2.5rem 0 0.6rem;
+      font-family: 'Helvetica Neue', Arial, sans-serif;
+      letter-spacing: 0.1em;
+      text-transform: uppercase;
+    }
+    p { margin-bottom: 1.1rem; color: rgba(230,228,218,0.85); }
+    ul { margin: 0.5rem 0 1.1rem 1.5rem; }
+    li { margin-bottom: 0.45rem; color: rgba(230,228,218,0.85); font-size: 0.95rem; }
+
+    /* Footer */
+    footer {
+      margin-top: 4rem;
+      padding-top: 1.5rem;
+      border-top: 1px solid rgba(221,187,58,0.2);
+      font-family: 'Helvetica Neue', Arial, sans-serif;
+      font-size: 0.78rem;
+      color: rgba(230,228,218,0.4);
+      letter-spacing: 0.06em;
+    }
+    a { color: #DDBB3A; text-decoration: none; border-bottom: 1px solid rgba(221,187,58,0.4); }
+    a:hover { border-bottom-color: #DDBB3A; }
+    .btn { border-bottom: none; }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+
+    <!-- Hero -->
+    <div class="hero">
+      <h1>OmniTome</h1>
+      <p class="tagline">Your entire Calibre library, everywhere you read.</p>
+      <p class="pitch">OmniTome connects to your personal book library and makes it beautifully readable on any Android device — no third-party cloud required.</p>
+      <a class="btn" href="https://play.google.com/store/apps/details?id=com.omnitome.app">Get it on Google Play</a>
+    </div>
+
+    <!-- Feature image — swap src for your hosted feature graphic URL -->
+    <!-- <img class="feature-img" src="omnitome_feature.png" alt="OmniTome — Android e-reader for Calibre" /> -->
+
+    <hr class="rule" />
+
+    <!-- Three selling points -->
+    <div class="points">
+      <div class="point">
+        <h3>Your library, your server</h3>
+        <p>Connect directly to your own Calibre Content Server. Your books never touch anyone else's cloud.</p>
+      </div>
+      <div class="point">
+        <h3>A reader built for readers</h3>
+        <p>Full EPUB and PDF support with highlights, annotations, bookmarks, and a fully customizable reading experience.</p>
+      </div>
+      <div class="point">
+        <h3>One purchase. No subscription.</h3>
+        <p>Pay once and use OmniTome forever. No recurring fees, no ads, no premium tiers.</p>
+      </div>
+    </div>
+
+    <hr class="rule" />
+
+    <!-- Feature detail -->
+    <h2>Everything you need</h2>
+    <ul>
+      <li>Sync your entire Calibre library over your home network or remotely</li>
+      <li>Read EPUB and PDF with customizable fonts, sizing, and themes</li>
+      <li>Highlight passages in four colors and add typed annotations</li>
+      <li>Export your highlights and notes as a formatted PDF</li>
+      <li>Series grouping, tag filtering, and multi-field search</li>
+      <li>Import local files from your device or Google Drive</li>
+      <li>Upload local books directly to your Calibre library</li>
+      <li>Tablet-optimized two-page reading layout</li>
+    </ul>
+
+    <hr class="rule" />
+
+    <footer>
+      &copy; 2026 OmniTome Media &nbsp;·&nbsp;
+      <a href="/about">About</a> &nbsp;·&nbsp;
+      <a href="/privacy-policy">Privacy Policy</a> &nbsp;·&nbsp;
+      <a href="mailto:admin@omnitomemedia.com">Contact</a>
+    </footer>
+
+  </div>
+</body>
+</html>

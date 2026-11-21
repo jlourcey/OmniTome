@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    Network Security Config
+
+    Calibre's content server uses plain HTTP on your local network.
+    Android 9+ blocks HTTP by default, so we permit cleartext traffic here.
+
+    This is safe because OmniTome only talks to servers on your local
+    network (Calibre) — it never sends credentials over the public internet.
+-->
+<network-security-config>
+    <base-config cleartextTrafficPermitted="true" />
+</network-security-config>

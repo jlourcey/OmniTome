@@ -1,0 +1,56 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+
+    <!--
+        Base application theme.
+        We use Theme.Material3 as the base so that non-Compose views
+        (like the ReaderActivity's FrameLayout and Readium's web view)
+        get Material 3 styling automatically.
+
+        windowBackground is set to white to avoid a flash before Compose renders.
+        Compose's own EReaderTheme handles all color theming from there.
+    -->
+    <style name="Theme.EReader" parent="Theme.Material3.DayNight.NoActionBar">
+        <item name="android:windowBackground">@android:color/white</item>
+        <item name="android:windowAnimationStyle">@null</item>
+    </style>
+
+    <!--
+        Reader activity theme — full screen with no status bar decorations.
+        The Compose HUD controls insets manually via statusBarsPadding()
+        and navigationBarsPadding().
+    -->
+    <style name="Theme.EReader.Reader" parent="Theme.EReader">
+        <item name="android:windowFullscreen">false</item>
+        <item name="android:windowLayoutInDisplayCutoutMode">shortEdges</item>
+    </style>
+
+    <!--
+        Launch-screen theme — applied to MainActivity only.
+
+        IMPORTANT: parent is Theme.EReader (not Theme.SplashScreen.*) so that
+        all Material3 color and typography attributes are always present. If
+        the parent were a bare SplashScreen theme and the postSplashScreenTheme
+        switch misfired, the entire app would run without Material3 styling and
+        interactive components (FilterChips, etc.) would fail to respond.
+
+        On Android 12+ (API 31+) the OS reads these attributes to show a
+        branded system splash before the first Compose frame:
+          • windowSplashScreenBackground   — deep navy, no white flash
+          • windowSplashScreenAnimatedIcon — app launcher icon on navy bg
+          • postSplashScreenTheme         — redundant here (parent already is
+                                            Theme.EReader) but kept for clarity
+
+        On Android 8–11 (API 26–30) the core-splashscreen compat library
+        emulates the effect.
+
+        MainActivity calls installSplashScreen() in onCreate() to hand off
+        to the in-app animated SplashScreen composable.
+    -->
+    <style name="Theme.EReader.Splash" parent="Theme.EReader">
+        <item name="windowSplashScreenBackground">@color/splash_bg_navy</item>
+        <item name="windowSplashScreenAnimatedIcon">@mipmap/ic_launcher</item>
+        <item name="postSplashScreenTheme">@style/Theme.EReader</item>
+    </style>
+
+</resources>

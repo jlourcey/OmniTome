@@ -1,0 +1,22 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# gradle.properties.template
+#
+# HOW TO USE:
+#   1. Copy this file to gradle.properties  (same folder)
+#   2. Fill in your own values below
+#   3. gradle.properties is gitignored — your secrets stay local
+# ─────────────────────────────────────────────────────────────────────────────
+
+org.gradle.jvmargs=-Xmx4096m -Dfile.encoding=UTF-8
+org.gradle.parallel=true
+org.gradle.configureondemand=true
+org.gradle.configuration-cache=true
+android.useAndroidX=true
+android.enableJetifier=false
+kotlin.code.style=official
+
+# ── Calibre OPDS server ───────────────────────────────────────────────────────
+# Set this to your Calibre server's IP address and port.
+# Find the IP in Calibre → Preferences → Sharing over the net → Current IP address
+# Default port is 8080.
+calibre.base.url=http://192.168.68.60:8080

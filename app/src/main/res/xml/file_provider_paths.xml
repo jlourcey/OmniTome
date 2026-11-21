@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    FileProvider path configuration for OmniTome.
+
+    <cache-path> maps to Context.getCacheDir(). We share the "notes_export"
+    sub-directory that AnnotationPdfExporter writes PDFs into.
+
+    The FileProvider itself is declared in AndroidManifest.xml with authority
+    "${applicationId}.fileprovider". AnnotationPdfExporter must use the same
+    authority string when calling FileProvider.getUriForFile().
+-->
+<paths>
+    <cache-path
+        name="notes_export"
+        path="notes_export/" />
+</paths>

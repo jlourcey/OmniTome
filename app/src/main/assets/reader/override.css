@@ -1,0 +1,252 @@
+/* ============================================================
+   OmniTome Reader — CSS Override Sheet
+   ============================================================
+
+   Why this file exists:
+   EPUB publishers are free to embed any CSS they like, and many
+   use absolute sizes (px, pt), rigid margins, and no hyphenation.
+   On a mobile screen this causes tiny unscalable text, wall-to-wall
+   columns, and "rivers of white space" in justified paragraphs.
+
+   This sheet is injected AFTER the publisher's CSS so our rules
+   take priority. We use !important only where absolutely needed —
+   where the publisher has already used it or where specificity
+   tricks won't reliably win across all EPUB structures.
+   ============================================================ */
+
+
+/* ── 1. FONT SIZE NORMALIZATION ─────────────────────────────────
+   Problem: Publishers often hard-code "font-size: 12pt" on <p>
+   or even <span> elements. This bypasses the reader's font-size
+   preference entirely — the text stays 12pt no matter what the
+   user picks.
+
+   Fix: Reset body to 1em (inherits from Readium's CSS variables
+   which the user controls), then make all text containers inherit
+   from body. This way the user's preference propagates everywhere.
+   ──────────────────────────────────────────────────────────────── */
+
+body {
+    font-size: 1em !important;          /* inherit from Readium's user preference */
+}
+
+/* These elements are the most common offenders for hardcoded sizes */
+p, span, div, li, td, th, blockquote, pre, a, cite, em, strong {
+    font-size: inherit !important;
+}
+
+/* Restore a logical heading hierarchy relative to the base size */
+h1 { font-size: 2em    !important; }
+h2 { font-size: 1.6em  !important; }
+h3 { font-size: 1.3em  !important; }
+h4 { font-size: 1.15em !important; }
+h5 { font-size: 1em    !important; font-weight: bold !important; }
+h6 { font-size: 0.9em  !important; font-weight: bold !important; }
+
+
+/* ── 2. MARGIN, PADDING AND LAYOUT FIXES ───────────────────────
+   Problem A: Some publishers set margin: 0 on everything, giving
+   wall-to-wall text with no breathing room on a phone screen.
+
+   Problem B: Others set a fixed narrow width (e.g. 500px) on
+   the body that overflows on a 360px screen.
+
+   Fix: Zero-out body margin/padding then add a comfortable
+   em-based inset so text never touches the screen edge.
+   ──────────────────────────────────────────────────────────────── */
+
+body {
+    margin: 0 !important;
+    padding: 0.5em 1.1em !important;   /* comfortable side inset */
+    max-width: 100% !important;        /* never wider than the screen */
+    box-sizing: border-box !important;
+    width: auto !important;
+}
+
+p {
+    margin-top: 0.35em  !important;
+    margin-bottom: 0.7em !important;
+    /* Strip publisher's first-line indents — they look bad on mobile */
+    text-indent: 0 !important;
+}
+
+/* First paragraph in a chapter typically needs no top margin */
+p:first-of-type,
+p.noindent,
+p.first {
+    margin-top: 0 !important;
+    text-indent: 0 !important;
+}
+
+
+/* ── 3. LINE HEIGHT AND VERTICAL RHYTHM ────────────────────────
+   Problem: A fixed line-height in pixels (e.g. "line-height: 18px")
+   doesn't scale when the user increases font size — the lines overlap.
+
+   Fix: Use a unitless multiplier (1.6) which always means 1.6×
+   the current font-size, so it scales automatically.
+   ──────────────────────────────────────────────────────────────── */
+
+body {
+    line-height: 1.6 !important;
+}
+
+p, li, td, dd, blockquote {
+    line-height: inherit !important;   /* pick up the body value */
+}
+
+
+/* ── 4. TEXT JUSTIFICATION AND HYPHENATION ─────────────────────
+   Problem: Justified text without hyphenation forces the browser
+   to stretch spaces between words to fill each line. The result
+   is "rivers of white space" — visible diagonal gaps that run
+   through entire paragraphs and disrupt reading flow.
+
+   Fix: Enable CSS hyphenation so the browser can break long words
+   at syllable boundaries, filling lines evenly without over-spacing.
+   The -webkit- prefix is required for Android's WebView.
+   ──────────────────────────────────────────────────────────────── */
+
+body, p {
+    text-align: justify !important;
+    hyphens: auto !important;
+    -webkit-hyphens: auto !important;  /* required prefix on Android WebView */
+    /* Prevent a single character from being left alone on a line */
+    orphans: 2 !important;
+    widows:  2 !important;
+    /* Never let a single unbreakable token (e.g. a long URL) overflow */
+    overflow-wrap: break-word !important;
+    word-break: normal !important;
+}
+
+
+/* ── 5. IMAGE OVERFLOW PREVENTION ──────────────────────────────
+   Problem: A full-page illustration sized for a 6" e-ink screen
+   (e.g. width="600") bleeds past the right edge of a 360px phone
+   screen, clipping the image and breaking the layout.
+
+   Fix: max-width: 100% caps images at the container width.
+   height: auto preserves the aspect ratio.
+   ──────────────────────────────────────────────────────────────── */
+
+img, svg {
+    max-width: 100% !important;
+    height: auto !important;
+    display: block !important;         /* block so margins center it */
+    margin: 0.5em auto !important;
+}
+
+figure {
+    max-width: 100% !important;
+    margin: 1em 0 !important;
+    padding: 0 !important;
+}
+
+figcaption {
+    font-size: 0.85em !important;
+    text-align: center !important;
+    opacity: 0.8 !important;
+}
+
+/* Cover images may intentionally fill the page */
+img.cover,
+img[class*="cover"],
+.cover img,
+img[id*="cover"] {
+    max-width:  100vw !important;
+    max-height: 90vh !important;
+    width: auto !important;
+    object-fit: contain !important;
+}
+
+
+/* ── 6. TABLE BASE STYLES ──────────────────────────────────────
+   The JS injector (inject.js) wraps each table in a horizontally
+   scrollable div.  These rules ensure the table itself is readable
+   once the user scrolls: consistent padding, subtle borders, and
+   zebra-striping on dense data.
+   ──────────────────────────────────────────────────────────────── */
+
+table {
+    border-collapse: collapse !important;
+    font-size: 0.9em !important;       /* slightly smaller than body text */
+    min-width: max-content !important; /* prevents column squashing before scroll */
+}
+
+td, th {
+    padding: 0.4em 0.6em !important;
+    vertical-align: top !important;
+    border: 1px solid rgba(128, 128, 128, 0.4) !important;
+    word-break: normal !important;
+    white-space: normal !important;
+}
+
+th {
+    font-weight: bold !important;
+    background-color: rgba(128, 128, 128, 0.12) !important;
+}
+
+tr:nth-child(even) td {
+    background-color: rgba(128, 128, 128, 0.06) !important;
+}
+
+
+/* ── 7. MISCELLANEOUS FIXES ────────────────────────────────────
+   A catch-all for the most common publisher quirks that show up
+   on mobile screens.
+   ──────────────────────────────────────────────────────────────── */
+
+/* Fixed-height containers clip content on small screens.
+   Let them expand to fit their content instead. */
+div[style*="height:"],
+div[style*="height :"] {
+    height: auto !important;
+    min-height: 0 !important;
+}
+
+/* Publishers occasionally leave position:fixed elements
+   (e.g. decorative navigation bars) that cover reading content. */
+[style*="position: fixed"],
+[style*="position:fixed"] {
+    position: static !important;
+}
+
+/* Footnote superscripts should be legible without pushing lines apart */
+sup, sub {
+    font-size: 0.75em !important;
+    line-height: 0 !important;         /* collapse its line contribution */
+    position: relative !important;
+    vertical-align: baseline !important;
+}
+sup { top: -0.4em !important; }
+sub { bottom: -0.25em !important; }
+
+/* Do NOT override ::selection — let the OS use its native highlight colour
+   (typically blue). The saved highlights are rendered via <mark> elements
+   injected by ReaderActivity.injectJsHighlights(), not via ::selection. */
+
+/* ── 8. OMNITOME HIGHLIGHT MARKS ──────────────────────────────
+   Base styles for the <mark class="omni-highlight"> elements injected
+   by injectJsHighlights(). The background-color is set per-mark via JS
+   using setProperty('background-color', color, 'important').
+   These rules ensure no publisher CSS can override the mark's rendering.
+   ──────────────────────────────────────────────────────────────── */
+
+mark.omni-highlight {
+    /* Ensure the mark is inline so it doesn't break paragraph flow */
+    display: inline !important;
+    /* Rounded corners for a clean highlight look */
+    border-radius: 2px !important;
+    /* Never let publisher padding/margin collapse the mark */
+    padding: 0 !important;
+    margin: 0 !important;
+    /* Text must always inherit the surrounding colour so highlights
+       don't change the reading colour in night/sepia themes */
+    color: inherit !important;
+    /* NOTE: background-color is intentionally NOT set here.
+       Setting it with !important in a stylesheet can win the cascade
+       over the per-mark inline setProperty() call in some WebView builds,
+       making light colours like yellow disappear. The JS sets the colour
+       directly on element.style via setProperty with 'important' priority,
+       which is sufficient and reliable without a stylesheet backup. */
+}
