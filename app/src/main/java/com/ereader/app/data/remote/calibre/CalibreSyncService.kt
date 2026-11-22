@@ -41,6 +41,14 @@ data class CalibreLibraryInfo(
  *        body: {"device": "...", "cfi": "...", "pos_frac": 0.0-1.0}
  *        Only stored for logged-in users — Calibre answers 403 otherwise.
  *
+ *   GET  /ajax/book/{book_id}/{library_id}
+ *        → one book's metadata, including its custom columns ("user_metadata").
+ *        Used to find the library's "Read" column (see CalibreReadColumns).
+ *
+ *   POST /cdb/set-fields/{book_id}/{library_id}
+ *        body: {"changes": {"#read": true, "#date_read": "..."}, "loaded_book_ids": [id]}
+ *        Sets the Read status. Needs a user allowed to make changes.
+ *
  * Authentication uses the shared OkHttpClient, which already answers
  * Calibre's Digest password challenge (see NetworkModule).
  */
@@ -152,6 +160,108 @@ class CalibreSyncService @Inject constructor(
                     else -> throw IOException("Calibre returned HTTP ${resp.code} when saving the page you're on")
                 }
             }
+        }
+    }
+
+    // ── Read status ───────────────────────────────────────────────────────────
+
+    /**
+     * Finds this library's "Read" and "Date Read" columns by looking at one of
+     * its books. Returns [CalibreReadColumns.NONE] if the library has neither.
+     * Throws if Calibre can't be reached.
+     */
+    suspend fun fetchReadColumns(calibreBookId: Int, libraryId: String?): CalibreReadColumns {
+        val base = baseUrl()
+        val lib  = libraryId
+            ?: userPreferences.effectiveCalibreLibraryId.firstOrNull()
+            ?: fetchLibraryInfo().defaultId
+        val url = base.newBuilder()
+            .addPathSegments("ajax/book")
+            .addPathSegment(calibreBookId.toString())
+            .addPathSegment(lib)
+            .addQueryParameter("category_urls", "false")
+            .build()
+        return withContext(Dispatchers.IO) {
+            okHttpClient.newCall(Request.Builder().url(url).build()).execute().use { resp ->
+                if (!resp.isSuccessful) throw IOException("Calibre returned HTTP ${resp.code} when looking up the book")
+                val json = JSONObject(resp.body?.string().orEmpty())
+                CalibreReadColumns.detect(json.optJSONObject("user_metadata"))
+            }
+        }
+    }
+
+    /**
+     * Sets one book's Read status in Calibre.
+     * Marking read also fills in the Date Read column (if the library has one)
+     * when [readAt] is known; marking unread clears it.
+     * Throws on any failure so the caller can keep the change for next time.
+     */
+    suspend fun pushReadStatus(
+        calibreBookId: Int,
+        libraryId: String?,
+        columns: CalibreReadColumns,
+        isRead: Boolean,
+        readAt: Long?
+    ) {
+        val readKey = columns.readKey ?: throw IllegalStateException("No Read column in Calibre")
+        val base = baseUrl()
+        val lib  = libraryId
+            ?: userPreferences.effectiveCalibreLibraryId.firstOrNull()
+            ?: fetchLibraryInfo().defaultId
+        val changes = JSONObject().put(readKey, isRead)
+        columns.dateKey?.let { dateKey ->
+            when {
+                !isRead        -> changes.put(dateKey, JSONObject.NULL)
+                readAt != null -> changes.put(dateKey, java.time.Instant.ofEpochMilli(readAt).toString())
+                // Read, but date unknown ("A while ago") → leave Calibre's date alone.
+            }
+        }
+        val body = JSONObject()
+            .put("changes", changes)
+            .put("loaded_book_ids", JSONArray().put(calibreBookId))
+            .toString().toRequestBody(jsonType)
+        val url = base.newBuilder()
+            .addPathSegments("cdb/set-fields")
+            .addPathSegment(calibreBookId.toString())
+            .addPathSegment(lib)
+            .build()
+        withContext(Dispatchers.IO) {
+            okHttpClient.newCall(Request.Builder().url(url).post(body).build()).execute().use { resp ->
+                if (!resp.isSuccessful) {
+                    val reason = resp.body?.string().orEmpty().trim().take(200)
+                    throw IOException(
+                        when (resp.code) {
+                            401, 403 -> "Calibre refused the Read status (HTTP ${resp.code})" +
+                                        (if (reason.isNotBlank()) ": $reason." else ".") +
+                                        " In Calibre, give this user permission to make changes."
+                            else     -> "Calibre returned HTTP ${resp.code} when saving the Read status" +
+                                        (if (reason.isNotBlank()) ": $reason" else "")
+                        }
+                    )
+                }
+            }
+        }
+        Timber.d("Set $readKey=$isRead for Calibre book $calibreBookId")
+    }
+
+    // ── Reachability ──────────────────────────────────────────────────────────
+
+    /**
+     * Quick yes/no: does the Calibre server answer right now?
+     * Uses short timeouts so a phone on mobile data (which can't reach a home
+     * server) finds out in seconds instead of waiting 30+ seconds per request.
+     */
+    suspend fun isReachable(): Boolean {
+        val base = runCatching { baseUrl() }.getOrNull() ?: return false
+        val quick = okHttpClient.newBuilder()
+            .connectTimeout(5, java.util.concurrent.TimeUnit.SECONDS)
+            .callTimeout(10, java.util.concurrent.TimeUnit.SECONDS)
+            .build()
+        return withContext(Dispatchers.IO) {
+            runCatching {
+                val url = base.newBuilder().addPathSegments("ajax/library-info").build()
+                quick.newCall(Request.Builder().url(url).build()).execute().use { it.isSuccessful }
+            }.getOrDefault(false)
         }
     }
 }

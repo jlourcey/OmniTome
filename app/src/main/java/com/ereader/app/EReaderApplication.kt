@@ -3,6 +3,7 @@ package com.ereader.app
 import android.app.Application
 import coil.ImageLoader
 import coil.ImageLoaderFactory
+import com.ereader.app.sync.SyncScheduler
 import dagger.hilt.android.HiltAndroidApp
 import okhttp3.OkHttpClient
 import timber.log.Timber
@@ -30,6 +31,9 @@ class EReaderApplication : Application(), ImageLoaderFactory {
      */
     @Inject lateinit var okHttpClient: OkHttpClient
 
+    /** Sends notes / page / Read status to Calibre automatically when back online. */
+    @Inject lateinit var syncScheduler: SyncScheduler
+
     override fun newImageLoader(): ImageLoader =
         ImageLoader.Builder(this)
             .okHttpClient(okHttpClient)
@@ -45,6 +49,10 @@ class EReaderApplication : Application(), ImageLoaderFactory {
         if (BuildConfig.DEBUG) {
             Timber.plant(Timber.DebugTree())
         }
+
+        // Queue any changes still waiting for Calibre, and watch for the
+        // phone getting back online (e.g. joining your home Wi-Fi).
+        syncScheduler.start()
 
         Timber.d("EReaderApplication started")
     }

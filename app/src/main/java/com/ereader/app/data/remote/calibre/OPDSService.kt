@@ -357,7 +357,13 @@ class OPDSService @Inject constructor(
         val seriesIndex: Float?,
         val tags: List<String> = emptyList(),
         /** Calibre's internal integer ID — stored so the app can push edits back. */
-        val calibreBookId: Int = 0
+        val calibreBookId: Int = 0,
+        /** The library's Read / Date Read columns ([CalibreReadColumns.NONE] if it has none). */
+        val readColumns: CalibreReadColumns = CalibreReadColumns.NONE,
+        /** Calibre's Read value (only meaningful when readColumns.readKey != null). */
+        val isRead: Boolean = false,
+        /** Calibre's Date Read as epoch ms, or null. */
+        val readAt: Long? = null
     )
 
     /**
@@ -413,7 +419,7 @@ class OPDSService @Inject constructor(
         for (chunk in bookIds.chunked(100)) {
             val booksJson = httpGet(
                 "$baseUrl/ajax/books$libPath?ids=${chunk.joinToString(",")}" +
-                "&fields=title,authors,series,series_index,tags"
+                "&fields=title,authors,series,series_index,tags&category_urls=false"
             ) ?: continue
 
             try {
@@ -443,6 +449,12 @@ class OPDSService @Inject constructor(
                             .filter { it.isNotBlank() }
                     } else emptyList()
 
+                    // Read status lives in a custom column ("user_metadata") — see CalibreReadColumns.
+                    val userMeta    = book.optJSONObject("user_metadata")
+                    val readColumns = CalibreReadColumns.detect(userMeta)
+                    val isRead      = readColumns.readKey?.let { CalibreReadColumns.readValue(userMeta, it) } ?: false
+                    val readAt      = CalibreReadColumns.dateValue(userMeta, readColumns.dateKey)
+
                     // Emit a SeriesInfo for every book — even if it has no series
                     // or tags — so we can always back-fill the calibreBookId.
                     if (title.isNotBlank()) {
@@ -452,7 +464,10 @@ class OPDSService @Inject constructor(
                             seriesName       = series,
                             seriesIndex      = seriesIndex,
                             tags             = tags,
-                            calibreBookId    = idStr.toIntOrNull() ?: 0
+                            calibreBookId    = idStr.toIntOrNull() ?: 0,
+                            readColumns      = readColumns,
+                            isRead           = isRead,
+                            readAt           = readAt
                         )
                     }
                 }

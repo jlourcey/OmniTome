@@ -21,6 +21,9 @@ OmniTome is an Android e-reader that connects straight to your own **Calibre Con
 - **Notes & position sync**: highlights, notes, and reading position made offline sync back to Calibre when you reconnect
 - **Remove download**: clear a book off your phone, with a prompt to sync your notes and page first
 - **Multiple libraries**: one login, switch between the Calibre libraries your account can see
+- **Read status**: finished books are faded with a ✓ on your shelves; mark books read or unread, synced with a "Read" column in Calibre
+- **Reading streak**: a days-in-a-row counter, plus a "Finished this year" shelf of the books you've completed
+- **Automatic sync**: notes, reading position and Read status go to Calibre by themselves once your phone can reach the server again
 - **EPUB and PDF** reading, powered by the Readium SDK
 - **Customizable reading**: font, size, line spacing, margins, light/dark themes
 - **Highlights** in four colors, typed annotations, bookmarks, and chapter navigation
@@ -35,6 +38,7 @@ OmniTome is an Android e-reader that connects straight to your own **Calibre Con
 - A **Calibre Content Server** you can reach from your phone ([Calibre](https://calibre-ebook.com) is free)
   - In Calibre: **Preferences → Sharing over the net → Start server** (default port `8080`)
   - To sync notes back to Calibre, your Calibre user needs **write access** to the library
+  - To sync Read status, add a **Yes/No** column with lookup name `read` in Calibre (**Preferences → Add your own columns**). An optional **Date** column named `date_read` records when you finished each book
 
 ## Install
 

@@ -16,6 +16,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.shadow
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
@@ -84,6 +85,11 @@ class SeriesDetailViewModel @Inject constructor(
                 }
                 .onFailure { _message.value = offlineDownloadErrorMessage(book.title, it) }
         }
+    }
+
+    /** Long-press → "Mark as Read" / "Mark as Unread". */
+    fun onMarkRead(book: Book, read: Boolean, finishedToday: Boolean) {
+        viewModelScope.launch { _message.value = setReadWithMessage(repository, book, read, finishedToday) }
     }
 
     fun onMessageDismissed() { _message.value = null }
@@ -183,7 +189,8 @@ fun SeriesDetailScreen(
                         isDownloading = book.id in downloadingIds,
                         onReadOffline = { viewModel.onReadOffline(book) },
                         onRemoveDownload = { syncFirst -> viewModel.onRemoveDownload(book, syncFirst) },
-                        onSyncNotes   = { viewModel.onSyncNotes(book) }
+                        onSyncNotes   = { viewModel.onSyncNotes(book) },
+                        onMarkRead    = { read, today -> viewModel.onMarkRead(book, read, today) }
                     )
                     SeriesShelfBar()
                 }
@@ -217,10 +224,20 @@ private fun SeriesBookRow(
     isDownloading: Boolean   = false,
     onReadOffline: () -> Unit = {},
     onRemoveDownload: (syncFirst: Boolean) -> Unit = {},
-    onSyncNotes: () -> Unit  = {}
+    onSyncNotes: () -> Unit  = {},
+    onMarkRead: (read: Boolean, finishedToday: Boolean) -> Unit = { _, _ -> }
 ) {
     var showContextMenu by remember { mutableStateOf(false) }
     var showRemoveDownloadDialog by remember { mutableStateOf(false) }
+    var showMarkReadDialog by remember { mutableStateOf(false) }
+
+    if (showMarkReadDialog) {
+        MarkAsReadDialog(
+            book      = book,
+            onDismiss = { showMarkReadDialog = false },
+            onConfirm = { today -> onMarkRead(true, today) }
+        )
+    }
 
     if (showRemoveDownloadDialog) {
         RemoveDownloadDialog(
@@ -250,6 +267,19 @@ private fun SeriesBookRow(
             onClick     = { showContextMenu = false; onNotesClick() },
             leadingIcon = { Icon(Icons.Default.Notes, contentDescription = null) }
         )
+        if (book.isRead) {
+            DropdownMenuItem(
+                text        = { Text("Mark as Unread") },
+                onClick     = { showContextMenu = false; onMarkRead(false, false) },
+                leadingIcon = { Icon(Icons.Default.RemoveDone, contentDescription = null) }
+            )
+        } else {
+            DropdownMenuItem(
+                text        = { Text("Mark as Read") },
+                onClick     = { showContextMenu = false; showMarkReadDialog = true },
+                leadingIcon = { Icon(Icons.Default.TaskAlt, contentDescription = null) }
+            )
+        }
         if (book.source != BookSource.LOCAL && !book.isDownloaded && !isDownloading) {
             DropdownMenuItem(
                 text        = { Text("Read Offline") },
@@ -309,7 +339,10 @@ private fun SeriesBookRow(
                 model              = book.coverUrl,
                 contentDescription = "${book.title} cover",
                 contentScale       = ContentScale.Crop,
-                modifier           = Modifier.fillMaxSize(),
+                colorFilter        = coverColorFilter(book),
+                modifier           = Modifier
+                    .fillMaxSize()
+                    .graphicsLayer { alpha = if (book.isRead) READ_COVER_ALPHA else 1f },
                 loading = {
                     Box(
                         Modifier
@@ -363,6 +396,15 @@ private fun SeriesBookRow(
                     fontWeight = FontWeight.Medium
                 )
             }
+            // Read status line
+            if (book.isRead) {
+                Text(
+                    text       = "\u2713 Read",
+                    color      = Color(0xFF7CD992),
+                    fontSize   = 11.sp,
+                    fontWeight = FontWeight.Medium
+                )
+            }
             // Offline status line
             if (book.source != BookSource.LOCAL && (isDownloading || book.isDownloaded)) {
                 Text(
@@ -372,7 +414,7 @@ private fun SeriesBookRow(
                     fontWeight = FontWeight.Medium
                 )
             }
-            if (book.readingProgress > 0f) {
+            if (book.readingProgress > 0f && !book.isRead) {
                 Spacer(Modifier.height(4.dp))
                 LinearProgressIndicator(
                     progress        = { book.readingProgress },

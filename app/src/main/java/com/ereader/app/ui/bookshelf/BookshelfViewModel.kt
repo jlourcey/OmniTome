@@ -6,6 +6,7 @@ import com.ereader.app.data.local.entity.BookSource
 import com.ereader.app.data.repository.BookRepository
 import com.ereader.app.data.repository.CalibreLibraryChoices
 import com.ereader.app.domain.model.Book
+import com.ereader.app.domain.model.ReadingStreak
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.FlowPreview
@@ -77,6 +78,16 @@ class BookshelfViewModel @Inject constructor(
     val currentlyReading: StateFlow<Book?> = repository
         .observeCurrentlyReading()
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), null)
+
+    /** Books finished since 1 January — the "Finished this year" shelf. */
+    val finishedThisYear: StateFlow<List<Book>> = repository
+        .observeFinishedThisYear()
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
+
+    /** Days-in-a-row reading streak. */
+    val readingStreak: StateFlow<ReadingStreak> = repository
+        .observeReadingStreak()
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), ReadingStreak())
 
     val uiState: StateFlow<BookshelfUiState> = combine(
         _searchQuery.debounce(300L),
@@ -287,6 +298,11 @@ class BookshelfViewModel @Inject constructor(
                 }
                 .onFailure { _error.value = offlineDownloadErrorMessage(book.title, it) }
         }
+    }
+
+    /** Long-press → "Mark as Read" (read = true) or "Mark as Unread" (read = false). */
+    fun onMarkRead(book: Book, read: Boolean, finishedToday: Boolean) {
+        viewModelScope.launch { _error.value = setReadWithMessage(repository, book, read, finishedToday) }
     }
 
     fun onErrorDismissed() { _error.value = null }

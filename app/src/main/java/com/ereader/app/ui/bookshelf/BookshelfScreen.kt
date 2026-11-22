@@ -80,6 +80,9 @@ fun BookshelfScreen(
     val downloadingIds   by viewModel.downloadingIds.collectAsStateWithLifecycle()
     // Calibre libraries this login can open (switch shown only when there are 2+)
     val libraryChoices   by viewModel.libraryChoices.collectAsStateWithLifecycle()
+    // Reading streak + books finished this year
+    val readingStreak    by viewModel.readingStreak.collectAsStateWithLifecycle()
+    val finishedThisYear by viewModel.finishedThisYear.collectAsStateWithLifecycle()
 
     // Regular views: 4/5/6 columns by screen width
     // Series view: 3 columns so the stacked-cover bundles have room to breathe
@@ -113,6 +116,16 @@ fun BookshelfScreen(
                     ContinueReadingBanner(
                         book    = book,
                         onClick = { onBookClick(book) }
+                    )
+                }
+
+                // ── Reading streak + Finished this year shelf ─────────────────
+                // Hidden until there's something to show (a streak or a finished book).
+                if (readingStreak.current > 0 || finishedThisYear.isNotEmpty()) {
+                    ReadingStatsBar(
+                        streak      = readingStreak,
+                        finished    = finishedThisYear,
+                        onBookClick = onBookClick
                     )
                 }
 
@@ -151,7 +164,8 @@ fun BookshelfScreen(
                         downloadingIds     = downloadingIds,
                         onReadOffline      = viewModel::onReadOffline,
                         onRemoveDownload   = viewModel::onRemoveDownload,
-                        onSyncNotes        = viewModel::onSyncNotes
+                        onSyncNotes        = viewModel::onSyncNotes,
+                        onMarkRead         = viewModel::onMarkRead
                     )
                 }
             }
@@ -424,7 +438,8 @@ private fun BookshelfGrid(
     downloadingIds: Set<String> = emptySet(),
     onReadOffline: (Book) -> Unit = {},
     onRemoveDownload: (Book, Boolean) -> Unit = { _, _ -> },
-    onSyncNotes: (Book) -> Unit = {}
+    onSyncNotes: (Book) -> Unit = {},
+    onMarkRead: (Book, Boolean, Boolean) -> Unit = { _, _, _ -> }
 ) {
     val rows = remember(items, columnCount) { items.chunked(columnCount) }
 
@@ -460,7 +475,8 @@ private fun BookshelfGrid(
                                 isDownloading     = item.book.id in downloadingIds,
                                 onReadOffline     = { onReadOffline(item.book) },
                                 onRemoveDownload  = { syncFirst -> onRemoveDownload(item.book, syncFirst) },
-                                onSyncNotes       = { onSyncNotes(item.book) }
+                                onSyncNotes       = { onSyncNotes(item.book) },
+                                onMarkRead        = { read, today -> onMarkRead(item.book, read, today) }
                             )
                             is ShelfItem.SeriesBundle -> SeriesBundleCard(
                                 bundle   = item,
@@ -526,9 +542,11 @@ private fun SeriesBundleCard(
                     model              = stackCovers[i].coverUrl,
                     contentDescription = null,
                     contentScale       = ContentScale.Crop,
+                    colorFilter        = coverColorFilter(stackCovers[i]),
                     modifier           = Modifier
                         .fillMaxSize()
                         .graphicsLayer {
+                            alpha           = if (stackCovers[i].isRead) READ_COVER_ALPHA else 1f
                             rotationZ       = rotDeg
                             // Pivot from bottom-center → covers fan upward
                             transformOrigin = TransformOrigin(0.5f, 1f)
@@ -725,11 +743,22 @@ private fun BookCoverItem(
     isDownloading: Boolean = false,
     onReadOffline: () -> Unit = {},
     onRemoveDownload: (syncFirst: Boolean) -> Unit = {},
-    onSyncNotes: () -> Unit = {}
+    onSyncNotes: () -> Unit = {},
+    onMarkRead: (read: Boolean, finishedToday: Boolean) -> Unit = { _, _ -> }
 ) {
     var showContextMenu  by remember { mutableStateOf(false) }
     var showDeleteDialog by remember { mutableStateOf(false) }
     var showRemoveDownloadDialog by remember { mutableStateOf(false) }
+    var showMarkReadDialog by remember { mutableStateOf(false) }
+
+    // ── Mark as Read popup ("when did you finish it?") ────────────────────────
+    if (showMarkReadDialog) {
+        MarkAsReadDialog(
+            book      = book,
+            onDismiss = { showMarkReadDialog = false },
+            onConfirm = { today -> onMarkRead(true, today) }
+        )
+    }
 
     // ── Remove Download popup ("sync your notes and page read first?") ────────
     if (showRemoveDownloadDialog) {
@@ -787,6 +816,20 @@ private fun BookCoverItem(
                 onClick     = { showContextMenu = false; onNotesClick() },
                 leadingIcon = { Icon(Icons.Default.Notes, contentDescription = null) }
             )
+            // "Mark as Read" (asks when) / "Mark as Unread" (instant)
+            if (book.isRead) {
+                DropdownMenuItem(
+                    text        = { Text("Mark as Unread") },
+                    onClick     = { showContextMenu = false; onMarkRead(false, false) },
+                    leadingIcon = { Icon(Icons.Default.RemoveDone, contentDescription = null) }
+                )
+            } else {
+                DropdownMenuItem(
+                    text        = { Text("Mark as Read") },
+                    onClick     = { showContextMenu = false; showMarkReadDialog = true },
+                    leadingIcon = { Icon(Icons.Default.TaskAlt, contentDescription = null) }
+                )
+            }
             // "Read Offline" — saves a Calibre/Drive book onto the phone.
             // Hidden for imported books (they already live on the phone),
             // for books already saved, and while a save is in progress.
@@ -838,9 +881,12 @@ private fun BookCoverItem(
             model              = book.coverUrl,
             contentDescription = "${book.title} cover",
             contentScale       = ContentScale.Crop,
+            // Read books: greyed out and faded so unread ones stand out.
+            colorFilter        = coverColorFilter(book),
             modifier           = Modifier
                 .fillMaxWidth()
-                .aspectRatio(0.67f),
+                .aspectRatio(0.67f)
+                .graphicsLayer { alpha = if (book.isRead) READ_COVER_ALPHA else 1f },
             loading = {
                 Box(
                     modifier = Modifier
@@ -945,8 +991,15 @@ private fun BookCoverItem(
             }
         }
 
-        // ── Reading progress arc (top-left corner) ────────────────────────
-        if (book.readingProgress > 0f) {
+        // ── Read tick / reading progress arc (top-left corner) ────────────
+        if (book.isRead) {
+            ReadBadge(
+                modifier = Modifier
+                    .align(Alignment.TopStart)
+                    .padding(5.dp),
+                size     = 18.dp
+            )
+        } else if (book.readingProgress > 0f) {
             ReadingProgressArc(
                 progress = book.readingProgress,
                 modifier = Modifier
@@ -1165,9 +1218,11 @@ fun BookCard(
                 model              = book.coverUrl,
                 contentDescription = "${book.title} cover",
                 contentScale       = ContentScale.Crop,
+                colorFilter        = coverColorFilter(book),
                 modifier           = Modifier
                     .fillMaxWidth()
-                    .aspectRatio(0.67f),
+                    .aspectRatio(0.67f)
+                    .graphicsLayer { alpha = if (book.isRead) READ_COVER_ALPHA else 1f },
                 loading = {
                     Box(
                         modifier = Modifier
@@ -1183,6 +1238,12 @@ fun BookCard(
                 },
                 error = { CoverPlaceholder(title = book.title, author = book.author) }
             )
+            if (book.isRead) {
+                ReadBadge(
+                    modifier = Modifier.align(Alignment.TopStart).padding(8.dp),
+                    size     = 22.dp
+                )
+            }
             Box(
                 modifier = Modifier
                     .fillMaxWidth()

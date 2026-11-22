@@ -7,7 +7,9 @@ import com.ereader.app.data.local.entity.AnnotationColor
 import com.ereader.app.data.local.entity.AnnotationEntity
 import com.ereader.app.data.local.entity.BookEntity
 import com.ereader.app.data.local.entity.FileType
+import com.ereader.app.data.remote.calibre.CalibreReadColumns
 import com.ereader.app.data.remote.calibre.CalibreSyncService
+import com.ereader.app.sync.SyncScheduler
 import com.ereader.app.util.EpubSpineReader
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.Dispatchers
@@ -51,6 +53,7 @@ class NotesSyncRepository @Inject constructor(
     private val bookDao: BookDao,
     private val annotationDao: AnnotationDao,
     private val calibreSync: CalibreSyncService,
+    private val syncScheduler: SyncScheduler,
     @ApplicationContext private val appContext: Context
 ) {
 
@@ -112,6 +115,8 @@ class NotesSyncRepository @Inject constructor(
             throw e
         } catch (e: Exception) {
             Timber.e(e, "Notes sync failed for '${book.title}'")
+            // Nothing is lost — try again automatically once Calibre can be reached.
+            syncScheduler.schedule()
             Result.failure(e)
         } finally {
             _syncingIds.update { it - bookId }
@@ -128,6 +133,48 @@ class NotesSyncRepository @Inject constructor(
         if (pending.isEmpty()) return 0
         Timber.d("Auto-syncing notes for ${pending.size} book(s)")
         return pending.count { syncBook(it.id).isSuccess }
+    }
+
+    // ── Read status ───────────────────────────────────────────────────────────
+
+    /**
+     * Sends one book's Read status to Calibre's "Read" column.
+     * [columns] can be passed in when already known (library sync); otherwise
+     * they're looked up from the book itself.
+     * On success the book is no longer "pending". On any failure it stays pending
+     * and is retried on the next library sync.
+     */
+    suspend fun pushReadStatus(bookId: String, columns: CalibreReadColumns? = null): ReadPushResult =
+        withContext(Dispatchers.IO) {
+            val book = bookDao.getById(bookId) ?: return@withContext ReadPushResult.NotLinked
+            val calibreId = book.calibreBookId ?: return@withContext ReadPushResult.NotLinked
+            try {
+                val cols = columns ?: calibreSync.fetchReadColumns(calibreId, book.libraryKey)
+                if (cols.readKey == null) return@withContext ReadPushResult.NoReadColumn
+                calibreSync.pushReadStatus(calibreId, book.libraryKey, cols, book.isRead, book.readAt)
+                // Only clear if nothing changed while we were sending.
+                bookDao.clearReadStatusDirty(bookId, book.isRead)
+                ReadPushResult.Synced
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                Timber.w(e, "Read status sync failed for '${book.title}'")
+                ReadPushResult.Failed(e)
+            }
+        }
+
+    /**
+     * Sends every pending Read status. Called after a successful library sync,
+     * with the columns that sync found (one lookup for the whole library).
+     * @return how many books were synced.
+     */
+    suspend fun syncAllPendingReadStatus(libraryKey: String?, columns: CalibreReadColumns): Int {
+        if (columns.readKey == null) return 0
+        val pending = bookDao.getBooksWithUnsyncedReadStatus()
+            .filter { libraryKey == null || it.libraryKey == null || it.libraryKey == libraryKey }
+        if (pending.isEmpty()) return 0
+        Timber.d("Syncing Read status for ${pending.size} book(s)")
+        return pending.count { pushReadStatus(it.id, columns) == ReadPushResult.Synced }
     }
 
     // ── Helpers ───────────────────────────────────────────────────────────────
@@ -184,4 +231,16 @@ class NotesSyncRepository @Inject constructor(
 
     /** ISO-8601 UTC timestamp, e.g. 2026-11-20T19:45:12.345Z — the format Calibre expects. */
     private fun iso(epochMs: Long): String = Instant.ofEpochMilli(epochMs).toString()
+}
+
+/** What happened when OmniTome tried to send a Read status to Calibre. */
+sealed class ReadPushResult {
+    /** Calibre has it now. */
+    data object Synced : ReadPushResult()
+    /** Not a Calibre book (or not linked yet) — nothing to send. */
+    data object NotLinked : ReadPushResult()
+    /** This Calibre library has no "Read" column — kept in OmniTome only, sent once one exists. */
+    data object NoReadColumn : ReadPushResult()
+    /** Couldn't reach Calibre or it refused — kept and retried at the next sync. */
+    data class Failed(val error: Throwable) : ReadPushResult()
 }

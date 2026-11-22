@@ -8,14 +8,17 @@ import com.ereader.app.data.local.entity.BookEntity
 import com.ereader.app.data.local.entity.BookSource
 import com.ereader.app.data.local.entity.FileType
 import com.ereader.app.data.preferences.UserPreferences
+import com.ereader.app.data.remote.calibre.CalibreReadColumns
 import com.ereader.app.data.remote.calibre.CalibreSyncService
 import com.ereader.app.data.remote.calibre.CalibreUploadService
 import com.ereader.app.data.remote.calibre.OPDSService
 import com.ereader.app.data.remote.drive.DriveService
 import com.ereader.app.domain.model.Book
+import com.ereader.app.domain.model.ReadingStreak
 import com.ereader.app.domain.model.normalize
 import com.ereader.app.domain.model.toDomain
 import com.ereader.app.domain.model.toEntity
+import com.ereader.app.sync.SyncScheduler
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
@@ -34,6 +37,8 @@ import okhttp3.OkHttpClient
 import okhttp3.Request
 import timber.log.Timber
 import java.io.File
+import java.time.LocalDate
+import java.time.ZoneId
 import java.io.IOException
 import kotlin.coroutines.cancellation.CancellationException
 import java.util.UUID
@@ -72,6 +77,7 @@ class BookRepository @Inject constructor(
     private val notesSync: NotesSyncRepository,
     private val userPreferences: UserPreferences,
     private val calibreSyncService: CalibreSyncService,
+    private val syncScheduler: SyncScheduler,
     @ApplicationContext private val appContext: Context
 ) {
 
@@ -125,6 +131,19 @@ class BookRepository @Inject constructor(
         libraryView.flatMapLatest { v -> bookDao.search(query, v.key, v.includeUnassigned) }
             .map { it.map { e -> e.toDomain() } }
 
+    // ── Reading stats (Finished this year + reading streak) ──────────────────
+
+    /** Books finished since 1 January this year, newest first (all libraries). */
+    fun observeFinishedThisYear(): Flow<List<Book>> {
+        val startOfYear = LocalDate.now().withDayOfYear(1)
+            .atStartOfDay(ZoneId.systemDefault()).toInstant().toEpochMilli()
+        return bookDao.observeFinishedSince(startOfYear).map { it.map { e -> e.toDomain() } }
+    }
+
+    /** Current and best reading streak, from the days you turned pages. */
+    fun observeReadingStreak(): Flow<ReadingStreak> =
+        appDatabase.readingDayDao().observeDays().map { ReadingStreak.from(it) }
+
     // ── Library switch ────────────────────────────────────────────────────────
 
     /** Libraries this login can open + the selected one (for the bookshelf switch). */
@@ -165,6 +184,11 @@ class BookRepository @Inject constructor(
     }
 
     // ── Library sync ──────────────────────────────────────────────────────────
+
+    private companion object {
+        /** How far through a book counts as finished (the last page is rarely exactly 100 %). */
+        const val FINISHED_AT = 0.98f
+    }
 
     /**
      * Full library sync — fetches from all sources and deduplicates.
@@ -224,6 +248,18 @@ class BookRepository @Inject constructor(
                             calibreBookId    = info.calibreBookId
                         )
                     }
+                    // Read status from Calibre's "Read" column (skipped for books
+                    // whose status was changed in OmniTome and not sent yet).
+                    // Must come AFTER the ID back-fill above: it finds the book by its
+                    // Calibre ID, which a brand-new install only gets in that step.
+                    if (info.calibreBookId > 0 && info.readColumns.readKey != null) {
+                        bookDao.applyCalibreReadStatus(
+                            libraryKey    = libraryId.orEmpty(),
+                            calibreBookId = info.calibreBookId,
+                            isRead        = info.isRead,
+                            calibreReadAt = info.readAt
+                        )
+                    }
                     // Always back-fill series (Calibre is the source of truth)
                     if (info.seriesName.isNotBlank()) {
                         bookDao.backfillSeriesMetadata(
@@ -258,6 +294,16 @@ class BookRepository @Inject constructor(
             runCatching { notesSync.syncAllPending() }
                 .onSuccess { if (it > 0) Timber.d("Synced notes for $it book(s) to Calibre") }
                 .onFailure { Timber.e(it, "Automatic notes sync failed") }
+
+            // Read statuses changed in OmniTome (Mark as Read, finishing a book).
+            val readColumns = seriesInfoList.firstOrNull { it.readColumns.readKey != null }?.readColumns
+                ?: CalibreReadColumns.NONE
+            if (readColumns.readKey == null && seriesInfoList.isNotEmpty()) {
+                Timber.d("This Calibre library has no Read column — Read status stays in OmniTome")
+            }
+            runCatching { notesSync.syncAllPendingReadStatus(libraryId, readColumns) }
+                .onSuccess { if (it > 0) Timber.d("Synced Read status for $it book(s) to Calibre") }
+                .onFailure { Timber.e(it, "Automatic Read status sync failed") }
         }
 
         Timber.d("Library sync complete")
@@ -382,9 +428,62 @@ class BookRepository @Inject constructor(
 
     // ── Reading state ─────────────────────────────────────────────────────────
 
-    suspend fun saveReadingProgress(bookId: String, locatorJson: String, progress: Float) {
+    /**
+     * Saves where you are in a book.
+     * @param pageTurn true when you actually moved (not just the book reopening at
+     *                 its saved page). Page turns count toward the reading streak,
+     *                 and reaching the last page marks the book Read.
+     * @return true if this page turn just finished the book.
+     */
+    suspend fun saveReadingProgress(
+        bookId: String,
+        locatorJson: String,
+        progress: Float,
+        pageTurn: Boolean = false
+    ): Boolean {
+        val before = if (pageTurn) bookDao.getById(bookId) else null
         bookDao.updateReadingProgress(bookId, locatorJson, progress)
+        if (!pageTurn) return false
+
+        appDatabase.readingDayDao().markDay(LocalDate.now().toString())
+
+        // Crossed into the last pages (98 %+) of a book that isn't Read yet → finished!
+        if (before != null && !before.isRead &&
+            before.readingProgress < FINISHED_AT && progress >= FINISHED_AT) {
+            setReadStatus(before.toDomain(), read = true, finishedToday = true)
+            Timber.d("Finished '${before.title}' — marked Read")
+            return true
+        }
+        return false
     }
+
+    /**
+     * "Mark as Read" / "Mark as Unread".
+     * @param finishedToday  true = finished now (shows on this year's shelf);
+     *                       false = finished some time ago (date unknown).
+     * The change is saved straight away; for Calibre books it's then sent to
+     * Calibre if it can be reached, otherwise at the next sync from home.
+     */
+    suspend fun setReadStatus(book: Book, read: Boolean, finishedToday: Boolean = true): ReadPushResult {
+        val linked = book.source == BookSource.CALIBRE && book.calibreBookId != null
+        bookDao.setReadStatus(
+            id      = book.id,
+            isRead  = read,
+            readAt  = if (read && finishedToday) System.currentTimeMillis() else null,
+            dirty   = linked
+        )
+        if (!linked) return ReadPushResult.NotLinked
+        val result = notesSync.pushReadStatus(book.id)
+        // Couldn't reach Calibre → send it automatically once back online.
+        if (result is ReadPushResult.Failed) syncScheduler.schedule()
+        return result
+    }
+
+    /**
+     * Called when you close a book: queues the page you're on (and anything
+     * else pending) to go to Calibre as soon as it can be reached.
+     */
+    fun schedulePendingSync() = syncScheduler.schedule()
 
     suspend fun toggleFavorite(bookId: String, isFavorite: Boolean) {
         bookDao.setFavorite(bookId, isFavorite)

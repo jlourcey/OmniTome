@@ -38,7 +38,11 @@ data class Book(
     /** Calibre's internal integer ID — present for CALIBRE-source books after first sync. */
     val calibreBookId: Int?      = null,
     /** Calibre library id this book belongs to (null for Drive / local books). */
-    val libraryKey: String?      = null
+    val libraryKey: String?      = null,
+    /** Finished — drawn faded on the shelves. Synced with Calibre's "Read" column. */
+    val isRead: Boolean          = false,
+    /** When it was finished (epoch ms); null = unknown. */
+    val readAt: Long?            = null
 )
 
 // ── Mapping functions ─────────────────────────────────────────────────────────
@@ -69,7 +73,9 @@ fun Book.toEntity(): BookEntity = BookEntity(
     isDownloaded     = isDownloaded,
     localFilePath    = localFilePath,
     calibreBookId    = calibreBookId,
-    libraryKey       = libraryKey
+    libraryKey       = libraryKey,
+    isRead           = isRead,
+    readAt           = readAt
 )
 
 /**
@@ -95,7 +101,9 @@ fun BookEntity.toDomain(): Book = Book(
     isDownloaded    = isDownloaded,
     localFilePath   = localFilePath,
     calibreBookId   = calibreBookId,
-    libraryKey      = libraryKey
+    libraryKey      = libraryKey,
+    isRead          = isRead,
+    readAt          = readAt
 )
 
 /**

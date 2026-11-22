@@ -29,6 +29,8 @@ import javax.inject.Singleton
  *                   table for syncing notes back to Calibre. Nothing is lost.
  *   MIGRATION_6_7 — adds `books.libraryKey` so books from several Calibre
  *                   libraries can live side by side. Nothing is lost.
+ *   MIGRATION_7_8 — adds the Read status columns and the `reading_days` table.
+ *                   Books you already read to the end become "Read". Nothing is lost.
  */
 @Module
 @InstallIn(SingletonComponent::class)
@@ -139,6 +141,43 @@ object DatabaseModule {
         }
     }
 
+    /**
+     * v7 → v8: Read status + reading streak.
+     *  - books.isRead / readAt / readStatusDirty (see BookEntity).
+     *  - Books already read to the end (98 %+) are marked Read, dated by when you
+     *    last had them open. Calibre-linked ones are flagged so the next sync
+     *    tells Calibre.
+     *  - reading_days: one row per day you read. Seeded with the days you last
+     *    opened each book, so an existing habit isn't lost.
+     */
+    private val MIGRATION_7_8 = object : Migration(7, 8) {
+        override fun migrate(db: SupportSQLiteDatabase) {
+            db.execSQL("ALTER TABLE books ADD COLUMN isRead INTEGER NOT NULL DEFAULT 0")
+            db.execSQL("ALTER TABLE books ADD COLUMN readAt INTEGER")
+            db.execSQL("ALTER TABLE books ADD COLUMN readStatusDirty INTEGER NOT NULL DEFAULT 0")
+            db.execSQL("""
+                UPDATE books
+                SET isRead = 1,
+                    readAt = lastReadAt,
+                    readStatusDirty = CASE WHEN calibreBookId IS NOT NULL THEN 1 ELSE 0 END
+                WHERE readingProgress >= 0.98
+            """.trimIndent())
+            db.execSQL("""
+                CREATE TABLE IF NOT EXISTS reading_days (
+                    day    TEXT    NOT NULL PRIMARY KEY,
+                    lastAt INTEGER NOT NULL
+                )
+            """.trimIndent())
+            // 'localtime' = the phone's own time zone, matching how new days are recorded.
+            db.execSQL("""
+                INSERT OR IGNORE INTO reading_days (day, lastAt)
+                SELECT date(lastReadAt / 1000, 'unixepoch', 'localtime'), MAX(lastReadAt)
+                FROM books WHERE lastReadAt IS NOT NULL
+                GROUP BY date(lastReadAt / 1000, 'unixepoch', 'localtime')
+            """.trimIndent())
+        }
+    }
+
     @Provides
     @Singleton
     fun provideDatabase(@ApplicationContext context: Context): AppDatabase =
@@ -147,7 +186,7 @@ object DatabaseModule {
             AppDatabase::class.java,
             "ereader.db"
         )
-        .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6, MIGRATION_6_7)
+        .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6, MIGRATION_6_7, MIGRATION_7_8)
         .fallbackToDestructiveMigrationOnDowngrade()
         .build()
 

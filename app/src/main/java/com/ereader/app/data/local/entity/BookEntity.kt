@@ -1,5 +1,6 @@
 package com.ereader.app.data.local.entity
 
+import androidx.room.ColumnInfo
 import androidx.room.Entity
 import androidx.room.Index
 import androidx.room.PrimaryKey
@@ -110,6 +111,29 @@ data class BookEntity(
      * Anything changed after this moment is "pending" — see NotesSyncRepository.
      */
     val notesSyncedAt: Long?   = null,
+
+    // ── Read status ───────────────────────────────────────────────────────────
+    /**
+     * True once the book is finished — either marked by hand ("Mark as Read"),
+     * reached the last page in the reader, or marked "Read" in Calibre.
+     * Read books are drawn faded on the shelves.
+     */
+    @ColumnInfo(defaultValue = "0")
+    val isRead: Boolean        = false,
+
+    /**
+     * When the book was finished (epoch ms). NULL = finished at an unknown time
+     * (e.g. "A while ago", or Calibre has no "Date Read" column). Only books with
+     * a date in the current year appear on the "Finished this year" shelf.
+     */
+    val readAt: Long?          = null,
+
+    /**
+     * True when the read status was changed in OmniTome and hasn't reached
+     * Calibre yet. While true, Calibre's value is NOT copied over ours.
+     */
+    @ColumnInfo(defaultValue = "0")
+    val readStatusDirty: Boolean = false,
 
     // ── Housekeeping ──────────────────────────────────────────────────────────
     val addedAt: Long          = System.currentTimeMillis(),

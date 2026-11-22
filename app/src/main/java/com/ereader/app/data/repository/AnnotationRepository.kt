@@ -5,6 +5,7 @@ import com.ereader.app.data.local.entity.AnnotationTombstoneEntity
 import com.ereader.app.domain.model.Annotation
 import com.ereader.app.domain.model.toDomain
 import com.ereader.app.domain.model.toEntity
+import com.ereader.app.sync.SyncScheduler
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.map
 import javax.inject.Inject
@@ -19,7 +20,8 @@ import javax.inject.Singleton
  */
 @Singleton
 class AnnotationRepository @Inject constructor(
-    private val dao: AnnotationDao
+    private val dao: AnnotationDao,
+    private val syncScheduler: SyncScheduler
 ) {
 
     /** Live stream of all annotations for [bookId], in reading order. */
@@ -31,7 +33,11 @@ class AnnotationRepository @Inject constructor(
         dao.getForBook(bookId).map { it.toDomain() }
 
     /** Save (insert or update) an annotation. */
-    suspend fun save(annotation: Annotation) = dao.upsert(annotation.toEntity())
+    /** Save (insert or update) an annotation, and queue it for Calibre. */
+    suspend fun save(annotation: Annotation) {
+        dao.upsert(annotation.toEntity())
+        syncScheduler.schedule()
+    }
 
     /**
      * Delete a single annotation by id.
@@ -42,6 +48,7 @@ class AnnotationRepository @Inject constructor(
         dao.deleteById(id)
         if (bookId != null) {
             dao.insertTombstone(AnnotationTombstoneEntity(id, bookId, System.currentTimeMillis()))
+            syncScheduler.schedule()
         }
     }
 

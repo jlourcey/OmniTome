@@ -92,6 +92,14 @@ interface BookDao {
     """)
     fun search(query: String, libraryKey: String, includeUnassigned: Boolean): Flow<List<BookEntity>>
 
+    /**
+     * Books finished on or after [since] (start of this year), newest first.
+     * Feeds the "Finished this year" shelf. Covers every library you've synced,
+     * because it's your personal reading record, not one library's.
+     */
+    @Query("SELECT * FROM books WHERE isRead = 1 AND readAt IS NOT NULL AND readAt >= :since ORDER BY readAt DESC")
+    fun observeFinishedSince(since: Long): Flow<List<BookEntity>>
+
     // ── One-shot reads ────────────────────────────────────────────────────────
 
     @Query("SELECT * FROM books WHERE id = :id")
@@ -159,6 +167,46 @@ interface BookDao {
      */
     @Query("UPDATE books SET isDownloaded = :downloaded, localFilePath = :path WHERE id = :id")
     suspend fun setDownloaded(id: String, downloaded: Boolean, path: String?)
+
+    // ── Read status ───────────────────────────────────────────────────────────
+
+    /**
+     * Sets the Read status from inside OmniTome ("Mark as Read" / "Mark as Unread",
+     * or reaching the last page). [dirty] = still needs sending to Calibre.
+     */
+    @Query("UPDATE books SET isRead = :isRead, readAt = :readAt, readStatusDirty = :dirty WHERE id = :id")
+    suspend fun setReadStatus(id: String, isRead: Boolean, readAt: Long?, dirty: Boolean)
+
+    /** Called after Calibre accepted the read status — stops it being sent again. */
+    @Query("UPDATE books SET readStatusDirty = 0 WHERE id = :id AND isRead = :sentIsRead")
+    suspend fun clearReadStatusDirty(id: String, sentIsRead: Boolean)
+
+    /** Calibre-linked books whose read status changed in OmniTome and hasn't reached Calibre. */
+    @Query("SELECT * FROM books WHERE readStatusDirty = 1 AND calibreBookId IS NOT NULL")
+    suspend fun getBooksWithUnsyncedReadStatus(): List<BookEntity>
+
+    /**
+     * Copies Calibre's Read status onto our copy of the book during library sync.
+     * Skipped while our own change is still waiting to be sent ([readStatusDirty]),
+     * so marking a book offline is never undone by the next sync.
+     *  - Read in Calibre   → Read here; Calibre's "Date Read" wins when it has one,
+     *                        otherwise any date we already had is kept.
+     *  - Unread in Calibre → Unread here, and the date is cleared.
+     */
+    @Query("""
+        UPDATE books
+        SET isRead = :isRead,
+            readAt = CASE WHEN :isRead = 1 THEN COALESCE(:calibreReadAt, readAt) ELSE NULL END
+        WHERE calibreBookId = :calibreBookId
+          AND (libraryKey = :libraryKey OR libraryKey IS NULL)
+          AND readStatusDirty = 0
+    """)
+    suspend fun applyCalibreReadStatus(
+        libraryKey: String,
+        calibreBookId: Int,
+        isRead: Boolean,
+        calibreReadAt: Long?
+    )
 
     /** Records a successful notes sync to Calibre. */
     @Query("UPDATE books SET notesSyncedAt = :time WHERE id = :id")

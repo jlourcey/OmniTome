@@ -274,12 +274,19 @@ class ReaderViewModel @Inject constructor(
 
     /** Called by the Activity each time Readium reports the current page position. */
     fun updateCurrentLocator(locator: Locator) {
+        // The first position Readium reports is just the book reopening at its saved
+        // page. Only later, different positions are real page turns — those count
+        // toward the reading streak and can finish the book.
+        val previous = _currentLocator.value
+        val pageTurn = previous != null &&
+            (previous.href != locator.href ||
+             previous.locations.totalProgression != locator.locations.totalProgression)
         _currentLocator.value = locator
         val state = _readerState.value as? ReaderState.Ready ?: return
         viewModelScope.launch {
             val locatorJson = locator.toJSON().toString()
             val progress    = locator.locations.totalProgression?.toFloat() ?: return@launch
-            repository.saveReadingProgress(state.bookId, locatorJson, progress)
+            repository.saveReadingProgress(state.bookId, locatorJson, progress, pageTurn)
         }
     }
 
@@ -444,6 +451,9 @@ class ReaderViewModel @Inject constructor(
 
     override fun onCleared() {
         super.onCleared()
+        // Send the page you stopped on (and any new notes) to Calibre — now if
+        // it can be reached, otherwise automatically once you're back online.
+        repository.schedulePendingSync()
         (_readerState.value as? ReaderState.Ready)?.publication?.close()
     }
 }
