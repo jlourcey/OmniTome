@@ -3,6 +3,7 @@ package com.ereader.app.ui.bookshelf
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.ereader.app.data.local.entity.BookSource
+import com.ereader.app.data.preferences.UserPreferences
 import com.ereader.app.data.repository.BookRepository
 import com.ereader.app.data.repository.CalibreLibraryChoices
 import com.ereader.app.domain.model.Book
@@ -60,8 +61,13 @@ data class BookshelfUiState(
 @OptIn(ExperimentalCoroutinesApi::class, FlowPreview::class)
 @HiltViewModel
 class BookshelfViewModel @Inject constructor(
-    private val repository: BookRepository
+    private val repository: BookRepository,
+    userPreferences: UserPreferences
 ) : ViewModel() {
+
+    /** Settings → App Appearance → "Show cover badges". */
+    val showCoverBadges: StateFlow<Boolean> = userPreferences.coverBadgesEnabled
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), true)
 
     private val _searchQuery = MutableStateFlow("")
 
@@ -303,6 +309,14 @@ class BookshelfViewModel @Inject constructor(
     /** Long-press → "Mark as Read" (read = true) or "Mark as Unread" (read = false). */
     fun onMarkRead(book: Book, read: Boolean, finishedToday: Boolean) {
         viewModelScope.launch { _error.value = setReadWithMessage(repository, book, read, finishedToday) }
+    }
+
+    /** Shows a message at the bottom of the bookshelf (e.g. after saving shelves). */
+    fun showMessage(message: String) { _error.value = message }
+
+    /** Long-press → "Rate Book" (stars = null clears the rating). */
+    fun onRate(book: Book, stars: Int?) {
+        viewModelScope.launch { _error.value = setRatingWithMessage(repository, book, stars) }
     }
 
     fun onErrorDismissed() { _error.value = null }

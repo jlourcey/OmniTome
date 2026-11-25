@@ -54,6 +54,9 @@ class EReaderApplication : Application(), ImageLoaderFactory {
         // phone getting back online (e.g. joining your home Wi-Fi).
         syncScheduler.start()
 
+        // Refresh the home-screen widget (if one has been added).
+        com.ereader.app.widget.ContinueReadingWidget.updateAll(this)
+
         Timber.d("EReaderApplication started")
     }
 }

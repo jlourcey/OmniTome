@@ -23,6 +23,7 @@ import okhttp3.OkHttpClient
 import okhttp3.Request
 import org.readium.r2.shared.publication.Locator
 import org.readium.r2.shared.publication.Publication
+import org.readium.r2.shared.publication.services.positions
 import org.readium.r2.shared.util.AbsoluteUrl
 import org.readium.r2.shared.util.Try
 import org.readium.r2.shared.util.asset.AssetRetriever
@@ -46,6 +47,15 @@ enum class TtsState { IDLE, PLAYING, PAUSED }
 
 // ── Reader UI states ──────────────────────────────────────────────────────────
 
+/** Read-aloud sleep timer. */
+sealed class SleepTimer {
+    data object Off : SleepTimer()
+    /** Stops at [endsAt] (epoch ms). */
+    data class At(val endsAt: Long, val minutes: Int) : SleepTimer()
+    /** Stops when the chapter ends. */
+    data object EndOfChapter : SleepTimer()
+}
+
 sealed class ReaderState {
     data object Loading : ReaderState()
     data class Ready(
@@ -53,6 +63,16 @@ sealed class ReaderState {
         val bookId: String,
         val lastLocator: String?
     ) : ReaderState()
+    /** A PDF — shown by OmniTome's own viewer (PdfReader.kt), not Readium. */
+    data class PdfReady(
+        val file: File,
+        val bookId: String,
+        val title: String,
+        /** Zero-based page to open at (from the saved position). */
+        val initialPage: Int
+    ) : ReaderState()
+    /** Calibre is converting a MOBI/AZW3/comic to EPUB (0.0–1.0). */
+    data class Converting(val title: String, val progress: Float) : ReaderState()
     data class Error(val message: String) : ReaderState()
 }
 
@@ -89,7 +109,9 @@ class ReaderViewModel @Inject constructor(
     private val bookmarkRepository: BookmarkRepository,
     private val assetRetriever: AssetRetriever,
     private val publicationOpener: PublicationOpener,
-    private val okHttpClient: OkHttpClient
+    private val okHttpClient: OkHttpClient,
+    private val userPreferences: com.ereader.app.data.preferences.UserPreferences,
+    private val dictionary: com.ereader.app.data.dictionary.DictionaryRepository
 ) : AndroidViewModel(application) {
 
     // ── Reader state ──────────────────────────────────────────────────────────
@@ -148,6 +170,23 @@ class ReaderViewModel @Inject constructor(
     /** Hides the HUD — called when an overlay opens or the user starts reading aloud. */
     fun hideHud() { _hudVisible.value = false }
 
+    // ── Areas of the screen covered by reader controls ────────────────────────
+    // The Activity treats a short tap anywhere as "show/hide the controls". Taps
+    // that land on the controls themselves (top bar, bottom bar, read-aloud
+    // player) must NOT do that, or e.g. the ⋮ menu closes the moment it opens.
+    private val controlAreas = java.util.concurrent.ConcurrentHashMap<String, android.graphics.RectF>()
+
+    /** Called by the controls when they're laid out (bounds in window pixels). */
+    fun setControlArea(key: String, left: Float, top: Float, right: Float, bottom: Float) {
+        controlAreas[key] = android.graphics.RectF(left, top, right, bottom)
+    }
+
+    /** Called when a control bar leaves the screen. */
+    fun clearControlArea(key: String) { controlAreas.remove(key) }
+
+    /** True if (x, y) — window pixels — is on a reader control. */
+    fun isOnControl(x: Float, y: Float): Boolean = controlAreas.values.any { it.contains(x, y) }
+
     // ── Notes overlay visibility ──────────────────────────────────────────────
     private val _showNotes = MutableStateFlow(false)
     val showNotes: StateFlow<Boolean> = _showNotes
@@ -198,16 +237,53 @@ class ReaderViewModel @Inject constructor(
 
     // ── Load book ─────────────────────────────────────────────────────────────
 
-    fun loadBook(bookId: String) {
+    /**
+     * Opens a book. [gotoHref]/[gotoProgression] open it at a particular spot
+     * instead of where you left off (used by "Search inside books").
+     */
+    fun loadBook(bookId: String, gotoHref: String? = null, gotoProgression: Double? = null) {
         viewModelScope.launch {
             _readerState.value = ReaderState.Loading
             try {
                 Timber.d("ReaderViewModel: loading book $bookId")
-                val book = repository.getBookById(bookId)
+                var book = repository.getBookById(bookId)
                     ?: throw Exception("Book not found in library (id=$bookId)")
                 _bookTitle.value = book.title
+                Timber.i(
+                    "OmniTomePos open id=$bookId title='${book.title}' " +
+                    "savedProgress=${"%.3f".format(book.readingProgress)} hasSavedPage=${book.lastLocator != null}"
+                )
+
+                // MOBI / AZW3 / comic: Calibre makes an EPUB first (only the first time).
+                if (book.fileType == FileType.CONVERT) {
+                    _readerState.value = ReaderState.Converting(book.title, 0f)
+                    book = try {
+                        repository.convertIfNeeded(book) { p ->
+                            _readerState.value = ReaderState.Converting(book.title, p)
+                        }
+                    } catch (e: java.io.IOException) {
+                        throw Exception(
+                            if (e is java.net.UnknownHostException || e is java.net.ConnectException ||
+                                e is java.net.SocketTimeoutException)
+                                "This book needs converting to EPUB by your Calibre server first, and the " +
+                                "server can't be reached. Try again on your home network."
+                            else e.localizedMessage ?: "Calibre couldn't convert this book"
+                        )
+                    }
+                }
 
                 val localFile = ensureLocalFile(book)
+                // Keep the book you're reading on the phone, in case you leave home.
+                viewModelScope.launch { runCatching { repository.autoSaveForOffline(bookId, localFile) } }
+
+                // PDFs open in OmniTome's own viewer (Android's PdfRenderer).
+                if (book.fileType == FileType.PDF || isPdfFile(localFile)) {
+                    val page = book.lastLocator?.let { json ->
+                        runCatching { Locator.fromJSON(org.json.JSONObject(json))?.locations?.position }.getOrNull()
+                    }?.minus(1) ?: 0
+                    _readerState.value = ReaderState.PdfReady(localFile, bookId, book.title, page.coerceAtLeast(0))
+                    return@launch
+                }
 
                 val fileUri = Uri.fromFile(localFile).toString()
                 val absUrl  = AbsoluteUrl(fileUri)
@@ -222,16 +298,52 @@ class ReaderViewModel @Inject constructor(
                     is Try.Failure -> throw Exception("Cannot parse book: ${r.value.message}")
                 }
 
+                prepareReadingStats(bookId, publication)
                 _readerState.value = ReaderState.Ready(
                     publication = publication,
                     bookId      = bookId,
-                    lastLocator = book.lastLocator
+                    lastLocator = gotoHref?.let { href ->
+                        org.json.JSONObject()
+                            .put("href", href)
+                            .put("type", "application/xhtml+xml")
+                            .put("locations", org.json.JSONObject().put("progression", (gotoProgression ?: 0.0).coerceIn(0.0, 1.0)))
+                            .toString()
+                    } ?: book.lastLocator
                 )
             } catch (e: Exception) {
                 Timber.e(e, "Failed to open book $bookId")
                 _readerState.value = ReaderState.Error(e.localizedMessage ?: "Unknown error")
             }
         }
+    }
+
+    /** True if the file starts with "%PDF" (catches PDFs imported with an unusual name). */
+    private suspend fun isPdfFile(file: File): Boolean = withContext(Dispatchers.IO) {
+        runCatching {
+            file.inputStream().use { s -> ByteArray(4).also { s.read(it) }.decodeToString() == "%PDF" }
+        }.getOrDefault(false)
+    }
+
+    /**
+     * PDF viewer → a new page is showing. Saved exactly like an EPUB position, so
+     * Continue Reading, the progress arc, Calibre sync (as "how far through"),
+     * the reading streak and "Read" at the last page all work for PDFs too.
+     */
+    fun onPdfPageChanged(page: Int, pageCount: Int) {
+        val href = org.readium.r2.shared.util.Url("document.pdf") ?: return
+        val total = if (pageCount <= 1) 1.0 else page.toDouble() / (pageCount - 1)
+        updateCurrentLocator(
+            Locator(
+                href      = href,
+                mediaType = org.readium.r2.shared.util.mediatype.MediaType.PDF,
+                locations = Locator.Locations(
+                    fragments        = listOf("page=${page + 1}"),
+                    progression      = total,
+                    position         = page + 1,
+                    totalProgression = total
+                )
+            )
+        )
     }
 
     private suspend fun ensureLocalFile(book: Book): File = withContext(Dispatchers.IO) {
@@ -282,11 +394,40 @@ class ReaderViewModel @Inject constructor(
             (previous.href != locator.href ||
              previous.locations.totalProgression != locator.locations.totalProgression)
         _currentLocator.value = locator
-        val state = _readerState.value as? ReaderState.Ready ?: return
+        val bookId = when (val s = _readerState.value) {
+            is ReaderState.Ready    -> s.bookId
+            is ReaderState.PdfReady -> s.bookId
+            else                    -> return
+        }
         viewModelScope.launch {
             val locatorJson = locator.toJSON().toString()
             val progress    = locator.locations.totalProgression?.toFloat() ?: return@launch
-            repository.saveReadingProgress(state.bookId, locatorJson, progress, pageTurn)
+            Timber.i("OmniTomePos save id=$bookId progress=${"%.3f".format(progress)} pageTurn=$pageTurn")
+            val justFinished = repository.saveReadingProgress(bookId, locatorJson, progress, pageTurn)
+            // Reached the last pages → ask for a rating. Asked even if the book already
+            // has one: that may have come with Calibre's metadata, not from the reader.
+            // The popup starts at the current rating, so keeping it is one tap.
+            if (justFinished) {
+                repository.getBookById(bookId)?.let { _finishedBook.value = it }
+            }
+        }
+    }
+
+    // ── Finished the book → "How would you rate it?" ──────────────────────────
+
+    private val _finishedBook = MutableStateFlow<Book?>(null)
+    /** Set when the reader just reached the end of an unrated book; the reader shows the rating popup. */
+    val finishedBook: StateFlow<Book?> = _finishedBook.asStateFlow()
+
+    fun dismissFinishedRating() { _finishedBook.value = null }
+
+    /** "Save" in the finished-book rating popup. */
+    fun rateFinishedBook(book: Book, stars: Int?) {
+        _finishedBook.value = null
+        if (stars == null) return
+        viewModelScope.launch {
+            runCatching { repository.setRating(book, stars) }
+                .onFailure { Timber.w(it, "Could not save rating for '${book.title}'") }
         }
     }
 
@@ -445,15 +586,145 @@ class ReaderViewModel @Inject constructor(
     val readerThemePref: StateFlow<ReaderTheme>       = _readerThemePref
     val fontFamilyPref:  StateFlow<ReaderFontFamily>  = _fontFamilyPref
 
-    fun setFontSize(sp: Int)               { _fontSizeSp.value      = sp.coerceIn(12, 28) }
-    fun setTheme(theme: ReaderTheme)       { _readerThemePref.value = theme }
-    fun setFontFamily(f: ReaderFontFamily) { _fontFamilyPref.value  = f }
+    // ── Page numbers + time left ──────────────────────────────────────────────
+
+    private var statsTracker: ReadingStatsTracker? = null
+    private var statsBookId: String? = null
+
+    private val _readingStats = MutableStateFlow<ReadingStats?>(null)
+    /** "Page X of Y" and minutes left — null until the first page is measured. */
+    val readingStats: StateFlow<ReadingStats?> = _readingStats
+
+    /** Reads Readium's position map and this book's learned reading speed. */
+    private suspend fun prepareReadingStats(bookId: String, publication: Publication) {
+        runCatching {
+            val positions = publication.positions()
+            if (positions.isEmpty()) return
+            val chapters = linkedMapOf<String, Pair<Int, Int>>()
+            positions.forEachIndexed { i, loc ->
+                val href = loc.href.toString().substringBefore('#')
+                val cur = chapters[href]
+                chapters[href] = if (cur == null) i to 1 else cur.first to cur.second + 1
+            }
+            val (cpm, samples) = userPreferences.readingSpeed(bookId)
+            statsTracker = ReadingStatsTracker(chapters, positions.size, cpm, samples)
+            statsBookId  = bookId
+        }.onFailure { Timber.w(it, "Couldn't prepare page numbers / time left") }
+    }
+
+    /**
+     * The reader measured the page on screen: page [pageInChapter] of
+     * [pagesInChapter] in chapter [href], at screen width [screenWidthPx].
+     */
+    fun onLayoutMeasured(href: String, pageInChapter: Int, pagesInChapter: Int, screenWidthPx: Int) {
+        val tracker = statsTracker ?: return
+        val layout = "${_fontSizeSp.value}|${_fontFamilyPref.value}|$screenWidthPx"
+        val speedChanged = tracker.onLayoutMeasured(href, pageInChapter, pagesInChapter, layout, System.currentTimeMillis())
+        tracker.stats(href, pageInChapter)?.let { _readingStats.value = it }
+        if (speedChanged) {
+            val id = statsBookId ?: return
+            viewModelScope.launch { userPreferences.saveReadingSpeed(id, tracker.speedCpm, tracker.samples) }
+        }
+    }
+
+    // ── Read aloud: speed + sleep timer ───────────────────────────────────────
+
+    private val _ttsRate = MutableStateFlow(1.0f)
+    /** Read-aloud speed, remembered between books. */
+    val ttsRate: StateFlow<Float> = _ttsRate
+
+    private val _sleepTimer = MutableStateFlow<SleepTimer>(SleepTimer.Off)
+    val sleepTimer: StateFlow<SleepTimer> = _sleepTimer
+
+    fun setTtsRate(rate: Float) {
+        _ttsRate.value = rate
+        viewModelScope.launch { userPreferences.saveTtsRate(rate) }
+    }
+
+    fun setSleepTimer(timer: SleepTimer) { _sleepTimer.value = timer }
+
+    // ── Volume-key page turns ─────────────────────────────────────────────────
+
+    /** Settings → "Turn pages with volume keys". */
+    val volumeKeyPageTurns: StateFlow<Boolean> = userPreferences.volumeKeyPageTurns
+        .stateIn(viewModelScope, SharingStarted.Eagerly, false)
+
+    private val _pdfPageTurns = MutableSharedFlow<Int>(extraBufferCapacity = 4)
+    /** +1 / -1 page requests for the PDF viewer (from the volume keys). */
+    val pdfPageTurns: SharedFlow<Int> = _pdfPageTurns
+    fun turnPdfPage(delta: Int) { _pdfPageTurns.tryEmit(delta) }
+
+    // ── Dictionary ("Define") ─────────────────────────────────────────────────
+
+    private val _dictionaryCard = MutableStateFlow<DictionaryCardState?>(null)
+    /** Non-null while the definition card is open. */
+    val dictionaryCard: StateFlow<DictionaryCardState?> = _dictionaryCard
+
+    /** Selection menu → "Define". Looks the word up in the offline dictionary. */
+    fun lookUpWord(selection: String) {
+        val text = selection.trim()
+        if (text.isEmpty()) return
+        _dictionaryCard.value = DictionaryCardState(selection = text)
+        viewModelScope.launch {
+            val result = runCatching { dictionary.lookup(text) }
+                .onFailure { Timber.e(it, "Dictionary lookup failed") }
+                .getOrElse { com.ereader.app.data.dictionary.DictionaryResult(text, null, emptyList()) }
+            _dictionaryCard.update { it?.copy(result = result) }
+        }
+    }
+
+    /** Card → "Look up on Wikipedia" (needs internet). */
+    fun lookUpOnWikipedia() {
+        val card = _dictionaryCard.value ?: return
+        val term = card.result?.headword ?: card.selection
+        _dictionaryCard.update { it?.copy(wiki = WikiState.Loading) }
+        viewModelScope.launch {
+            val state = try {
+                dictionary.wikipedia(term)?.let { WikiState.Loaded(it) } ?: WikiState.NotFound
+            } catch (e: java.io.IOException) {
+                WikiState.Offline
+            } catch (e: Exception) {
+                Timber.w(e, "Wikipedia lookup failed"); WikiState.Offline
+            }
+            _dictionaryCard.update { it?.copy(wiki = state) }
+        }
+    }
+
+    fun dismissDictionary() { _dictionaryCard.value = null }
+
+    // Reading settings are remembered: the reader opens with what you last chose
+    // (in the reader controls or in Settings → Reader), and changes are saved.
+    init {
+        viewModelScope.launch {
+            _fontSizeSp.value = userPreferences.readerFontSize.first().coerceIn(12, 28)
+            runCatching { ReaderTheme.valueOf(userPreferences.readerTheme.first()) }
+                .onSuccess { _readerThemePref.value = it }
+            runCatching { ReaderFontFamily.valueOf(userPreferences.readerFontFamily.first()) }
+                .onSuccess { _fontFamilyPref.value = it }
+            _ttsRate.value = userPreferences.ttsRate.first()
+        }
+    }
+
+    fun setFontSize(sp: Int) {
+        _fontSizeSp.value = sp.coerceIn(12, 28)
+        viewModelScope.launch { userPreferences.saveReaderFontSize(_fontSizeSp.value) }
+    }
+    fun setTheme(theme: ReaderTheme) {
+        _readerThemePref.value = theme
+        viewModelScope.launch { userPreferences.saveReaderTheme(theme.name) }
+    }
+    fun setFontFamily(f: ReaderFontFamily) {
+        _fontFamilyPref.value = f
+        viewModelScope.launch { userPreferences.saveReaderFontFamily(f.name) }
+    }
 
     override fun onCleared() {
         super.onCleared()
         // Send the page you stopped on (and any new notes) to Calibre — now if
         // it can be reached, otherwise automatically once you're back online.
         repository.schedulePendingSync()
+        // Home-screen widget: show the new progress / streak.
+        com.ereader.app.widget.ContinueReadingWidget.updateAll(getApplication())
         (_readerState.value as? ReaderState.Ready)?.publication?.close()
     }
 }

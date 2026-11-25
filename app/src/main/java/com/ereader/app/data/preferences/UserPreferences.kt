@@ -7,10 +7,14 @@ import androidx.datastore.preferences.core.booleanPreferencesKey
 import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.floatPreferencesKey
 import androidx.datastore.preferences.core.intPreferencesKey
+import androidx.datastore.preferences.core.longPreferencesKey
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
+import com.ereader.app.data.remote.calibre.ReadColumnChoice
+import com.ereader.app.domain.model.SmartShelf
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
 import org.json.JSONArray
 import org.json.JSONObject
@@ -56,6 +60,10 @@ class UserPreferences @Inject constructor(
 
         // ── Onboarding ────────────────────────────────────────────────────────
         private val KEY_HAS_SEEN_WELCOME   = booleanPreferencesKey("has_seen_welcome")
+        private val KEY_TOUR_VERSION_SEEN  = intPreferencesKey("tour_version_seen")
+
+        // When this phone's reading days last reached Calibre's reading log (epoch ms)
+        private val KEY_READING_LOG_SYNCED_AT = longPreferencesKey("reading_log_synced_at")
 
         // ── App appearance ────────────────────────────────────────────────────
         private val KEY_APP_THEME          = stringPreferencesKey("app_theme")
@@ -122,6 +130,16 @@ class UserPreferences @Inject constructor(
     /** True once the user has seen (and dismissed) the welcome / tour screen. */
     val hasSeenWelcome: Flow<Boolean> = context.dataStore.data
         .map { prefs -> prefs[KEY_HAS_SEEN_WELCOME] ?: false }
+
+    /**
+     * Which version of the tour the user was last offered (see TOUR_VERSION in
+     * WelcomeScreen.kt). Anyone who saw the welcome before tour versions existed
+     * counts as having seen version 1, so 2.0's "What's new" prompt reaches them.
+     */
+    val tourVersionSeen: Flow<Int> = context.dataStore.data
+        .map { prefs ->
+            prefs[KEY_TOUR_VERSION_SEEN] ?: if (prefs[KEY_HAS_SEEN_WELCOME] == true) 1 else 0
+        }
 
     // ── App theme reads ───────────────────────────────────────────────────────
 
@@ -219,8 +237,12 @@ class UserPreferences @Inject constructor(
 
     // ── Onboarding writes ─────────────────────────────────────────────────────
 
-    suspend fun markWelcomeSeen() {
-        context.dataStore.edit { prefs -> prefs[KEY_HAS_SEEN_WELCOME] = true }
+    /** Welcome / "What's new" dismissed: don't offer this [tourVersion] of the tour again. */
+    suspend fun markWelcomeSeen(tourVersion: Int) {
+        context.dataStore.edit { prefs ->
+            prefs[KEY_HAS_SEEN_WELCOME]  = true
+            prefs[KEY_TOUR_VERSION_SEEN] = tourVersion
+        }
     }
 
     // ── App theme writes ──────────────────────────────────────────────────────
@@ -241,5 +263,146 @@ class UserPreferences @Inject constructor(
 
     suspend fun saveReaderTheme(theme: String) {
         context.dataStore.edit { prefs -> prefs[KEY_READER_THEME] = theme }
+    }
+
+    // ── Reading log (shared streak) ───────────────────────────────────────────
+
+    /** When this phone's reading days were last sent to Calibre (0 = never). */
+    val readingLogSyncedAt: Flow<Long> = context.dataStore.data
+        .map { prefs -> prefs[KEY_READING_LOG_SYNCED_AT] ?: 0L }
+
+    suspend fun setReadingLogSyncedAt(time: Long) {
+        context.dataStore.edit { prefs -> prefs[KEY_READING_LOG_SYNCED_AT] = time }
+    }
+
+    // ── Reading speed per book (time-left estimates) ──────────────────────────
+
+    /** Learned reading speed for a book: (characters per minute or null, page turns timed). */
+    suspend fun readingSpeed(bookId: String): Pair<Float?, Int> {
+        val prefs = context.dataStore.data.first()
+        return prefs[floatPreferencesKey("speed_cpm_$bookId")] to (prefs[intPreferencesKey("speed_samples_$bookId")] ?: 0)
+    }
+
+    suspend fun saveReadingSpeed(bookId: String, cpm: Float, samples: Int) {
+        context.dataStore.edit { prefs ->
+            prefs[floatPreferencesKey("speed_cpm_$bookId")] = cpm
+            prefs[intPreferencesKey("speed_samples_$bookId")] = samples
+        }
+    }
+
+    // ── Read aloud ────────────────────────────────────────────────────────────
+
+    /** Read-aloud speed (1.0 = normal). */
+    val ttsRate: Flow<Float> = context.dataStore.data
+        .map { prefs -> prefs[floatPreferencesKey("tts_rate")] ?: 1.0f }
+
+    suspend fun saveTtsRate(rate: Float) {
+        context.dataStore.edit { prefs -> prefs[floatPreferencesKey("tts_rate")] = rate }
+    }
+
+    // ── Volume-key page turns ────────────────────────────────────────────────
+
+    /** Volume Down = next page, Volume Up = previous page, while reading. Off by default. */
+    val volumeKeyPageTurns: Flow<Boolean> = context.dataStore.data
+        .map { prefs -> prefs[booleanPreferencesKey("volume_key_page_turns")] ?: false }
+
+    suspend fun saveVolumeKeyPageTurns(on: Boolean) {
+        context.dataStore.edit { prefs -> prefs[booleanPreferencesKey("volume_key_page_turns")] = on }
+    }
+
+    // ── Cover badges ─────────────────────────────────────────────────────────
+
+    /** Read / New / Favorite badges on library covers. On by default. */
+    val coverBadgesEnabled: Flow<Boolean> = context.dataStore.data
+        .map { prefs -> prefs[booleanPreferencesKey("cover_badges_enabled")] ?: true }
+
+    suspend fun saveCoverBadgesEnabled(on: Boolean) {
+        context.dataStore.edit { prefs -> prefs[booleanPreferencesKey("cover_badges_enabled")] = on }
+    }
+
+    // ── Read Tracking columns (Settings → Read Tracking) ──────────────────────
+    //
+    // Stored per Calibre library, because each library can have its own columns.
+    // Key: "read_columns_<library id>"
+    // Value: {"read":"#read","date":"","times":"-","shelves":""}   ("" = Automatic, "-" = off)
+
+    private fun readColumnsKey(libraryId: String) = stringPreferencesKey("read_columns_$libraryId")
+
+    private fun parseColumnChoice(raw: String?): ReadColumnChoice = runCatching {
+        val o = JSONObject(raw ?: "{}")
+        ReadColumnChoice(
+            read    = o.optString("read"),
+            date    = o.optString("date"),
+            times   = o.optString("times"),
+            shelves = o.optString("shelves")
+        )
+    }.getOrDefault(ReadColumnChoice.DEFAULT)
+
+    /** The column picks for one library (all Automatic if never changed). */
+    suspend fun getReadColumnChoice(libraryId: String?): ReadColumnChoice {
+        if (libraryId == null) return ReadColumnChoice.DEFAULT
+        return parseColumnChoice(context.dataStore.data.first()[readColumnsKey(libraryId)])
+    }
+
+    /** Live version of [getReadColumnChoice] — used by the Settings screen. */
+    fun observeReadColumnChoice(libraryId: String): Flow<ReadColumnChoice> = context.dataStore.data
+        .map { prefs -> parseColumnChoice(prefs[readColumnsKey(libraryId)]) }
+
+    suspend fun saveReadColumnChoice(libraryId: String, choice: ReadColumnChoice) {
+        val json = JSONObject()
+            .put("read", choice.read)
+            .put("date", choice.date)
+            .put("times", choice.times)
+            .put("shelves", choice.shelves)
+            .toString()
+        context.dataStore.edit { prefs -> prefs[readColumnsKey(libraryId)] = json }
+    }
+
+    // ── Smart Shelves ─────────────────────────────────────────────────────────
+    //
+    // Stored per Calibre library as a JSON list:
+    //   [{"id":"…","name":"Unread Fantasy","query":"tags:\"=Fantasy\" and #read:false",
+    //     "ids":[12,40,77],"updatedAt":1732500000000}, …]
+    // "ids" = the Calibre book ids that matched the last time Calibre was asked,
+    // so the shelf still works with no connection.
+
+    private fun smartShelvesKey(libraryId: String) = stringPreferencesKey("smart_shelves_$libraryId")
+
+    private fun parseShelves(raw: String?): List<SmartShelf> = runCatching {
+        val arr = JSONArray(raw ?: "[]")
+        (0 until arr.length()).map { i ->
+            val o   = arr.getJSONObject(i)
+            val ids = o.optJSONArray("ids") ?: JSONArray()
+            SmartShelf(
+                id         = o.getString("id"),
+                name       = o.optString("name"),
+                query      = o.optString("query"),
+                calibreIds = (0 until ids.length()).map { ids.getInt(it) },
+                updatedAt  = o.optLong("updatedAt", 0L)
+            )
+        }
+    }.getOrDefault(emptyList())
+
+    /** The Smart Shelves of one library, in the order they were made. */
+    fun observeSmartShelves(libraryId: String): Flow<List<SmartShelf>> = context.dataStore.data
+        .map { prefs -> parseShelves(prefs[smartShelvesKey(libraryId)]) }
+
+    suspend fun getSmartShelves(libraryId: String): List<SmartShelf> =
+        parseShelves(context.dataStore.data.first()[smartShelvesKey(libraryId)])
+
+    suspend fun saveSmartShelves(libraryId: String, shelves: List<SmartShelf>) {
+        val json = JSONArray().apply {
+            shelves.forEach { s ->
+                put(
+                    JSONObject()
+                        .put("id", s.id)
+                        .put("name", s.name)
+                        .put("query", s.query)
+                        .put("ids", JSONArray(s.calibreIds))
+                        .put("updatedAt", s.updatedAt)
+                )
+            }
+        }.toString()
+        context.dataStore.edit { prefs -> prefs[smartShelvesKey(libraryId)] = json }
     }
 }

@@ -11,10 +11,13 @@ import androidx.work.NetworkType
 import androidx.work.OneTimeWorkRequestBuilder
 import androidx.work.WorkManager
 import com.ereader.app.data.local.dao.BookDao
+import com.ereader.app.data.local.dao.ReadingDayDao
+import com.ereader.app.data.preferences.UserPreferences
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import timber.log.Timber
 import java.util.concurrent.TimeUnit
@@ -23,7 +26,7 @@ import javax.inject.Singleton
 
 /**
  * Makes sure anything waiting to go to Calibre — notes, deleted notes, the page
- * you're on, Read status — gets there automatically, without you having to open
+ * you're on, Read status, reading-streak days — gets there automatically, without you having to open
  * the app or pull to refresh.
  *
  * How it works:
@@ -43,7 +46,9 @@ import javax.inject.Singleton
 @Singleton
 class SyncScheduler @Inject constructor(
     @ApplicationContext private val context: Context,
-    private val bookDao: BookDao
+    private val bookDao: BookDao,
+    private val readingDayDao: ReadingDayDao,
+    private val userPreferences: UserPreferences
 ) {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val workManager get() = WorkManager.getInstance(context)
@@ -94,10 +99,12 @@ class SyncScheduler @Inject constructor(
         }
     }
 
-    /** True if any Calibre book has notes, a page or a Read status not yet sent. */
+    /** True if notes, a page, a Read status or reading days haven't reached Calibre yet. */
     suspend fun hasPending(): Boolean =
         bookDao.getBooksWithUnsyncedNotes().isNotEmpty() ||
-        bookDao.getBooksWithUnsyncedReadStatus().isNotEmpty()
+        bookDao.getBooksWithUnsyncedReadStatus().isNotEmpty() ||
+        bookDao.getBooksWithUnsyncedRating().isNotEmpty() ||
+        readingDayDao.lastReadAt() > userPreferences.readingLogSyncedAt.first()
 
     /**
      * Called once when the app starts: queues a sync if anything is waiting,

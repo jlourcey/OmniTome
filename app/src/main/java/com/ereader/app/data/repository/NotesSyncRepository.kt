@@ -3,6 +3,8 @@ package com.ereader.app.data.repository
 import android.content.Context
 import com.ereader.app.data.local.dao.AnnotationDao
 import com.ereader.app.data.local.dao.BookDao
+import com.ereader.app.data.local.dao.ReadingDayDao
+import com.ereader.app.data.preferences.UserPreferences
 import com.ereader.app.data.local.entity.AnnotationColor
 import com.ereader.app.data.local.entity.AnnotationEntity
 import com.ereader.app.data.local.entity.BookEntity
@@ -16,6 +18,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.withContext
 import org.json.JSONArray
@@ -54,6 +57,8 @@ class NotesSyncRepository @Inject constructor(
     private val annotationDao: AnnotationDao,
     private val calibreSync: CalibreSyncService,
     private val syncScheduler: SyncScheduler,
+    private val readingDayDao: ReadingDayDao,
+    private val userPreferences: UserPreferences,
     @ApplicationContext private val appContext: Context
 ) {
 
@@ -151,9 +156,19 @@ class NotesSyncRepository @Inject constructor(
             try {
                 val cols = columns ?: calibreSync.fetchReadColumns(calibreId, book.libraryKey)
                 if (cols.readKey == null) return@withContext ReadPushResult.NoReadColumn
-                calibreSync.pushReadStatus(calibreId, book.libraryKey, cols, book.isRead, book.readAt)
+
+                // Times Read: add the finishes recorded here to Calibre's CURRENT count
+                // (read fresh, so a number changed on the PC since the last sync isn't lost).
+                val sentPending = book.pendingReads
+                val newTimesRead = if (cols.timesKey != null && sentPending > 0) {
+                    val meta = calibreSync.fetchBookJson(calibreId, book.libraryKey).optJSONObject("user_metadata")
+                    CalibreReadColumns.timesValue(meta, cols.timesKey) + sentPending
+                } else null
+
+                calibreSync.pushReadStatus(calibreId, book.libraryKey, cols, book.isRead, book.readAt, newTimesRead)
                 // Only clear if nothing changed while we were sending.
                 bookDao.clearReadStatusDirty(bookId, book.isRead)
+                if (newTimesRead != null) bookDao.applyTimesReadPushed(bookId, newTimesRead, sentPending)
                 ReadPushResult.Synced
             } catch (e: CancellationException) {
                 throw e
@@ -176,6 +191,67 @@ class NotesSyncRepository @Inject constructor(
         Timber.d("Syncing Read status for ${pending.size} book(s)")
         return pending.count { pushReadStatus(it.id, columns) == ReadPushResult.Synced }
     }
+
+    // ── Star rating ("Rate Book") ─────────────────────────────────────────────
+
+    /**
+     * Sends one book's star rating to Calibre's Rating field.
+     * On any failure it stays pending and is retried on the next sync.
+     */
+    suspend fun pushRating(bookId: String): ReadPushResult = withContext(Dispatchers.IO) {
+        val book = bookDao.getById(bookId) ?: return@withContext ReadPushResult.NotLinked
+        val calibreId = book.calibreBookId ?: return@withContext ReadPushResult.NotLinked
+        try {
+            calibreSync.pushRating(calibreId, book.libraryKey, book.calibreRating)
+            bookDao.clearRatingDirty(bookId, book.calibreRating)
+            ReadPushResult.Synced
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            Timber.w(e, "Rating sync failed for '${book.title}'")
+            ReadPushResult.Failed(e)
+        }
+    }
+
+    /**
+     * Sends every pending rating (for [libraryKey], or all libraries when null).
+     * @return how many books were synced.
+     */
+    suspend fun syncAllPendingRatings(libraryKey: String?): Int {
+        val pending = bookDao.getBooksWithUnsyncedRating()
+            .filter { libraryKey == null || it.libraryKey == null || it.libraryKey == libraryKey }
+        if (pending.isEmpty()) return 0
+        Timber.d("Syncing ratings for ${pending.size} book(s)")
+        return pending.count { pushRating(it.id) == ReadPushResult.Synced }
+    }
+
+    // ── Reading log (streak across devices) ───────────────────────────────────
+
+    /**
+     * Swaps reading days with this Calibre login's reading log, so every device
+     * shows the same streak. Sends this phone's days, adds days from your other
+     * devices. See CalibreReadingLog.
+     * @return true if it worked; false if Calibre couldn't be reached (retried later).
+     */
+    suspend fun syncReadingLog(libraryId: String?): Boolean = withContext(Dispatchers.IO) {
+        try {
+            val startedAt = System.currentTimeMillis()
+            val local = readingDayDao.getAllDays().toSet()
+            val all   = calibreSync.syncReadingLog(libraryId, local)
+            (all - local).forEach { readingDayDao.addSyncedDay(it) }
+            userPreferences.setReadingLogSyncedAt(startedAt)
+            true
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            Timber.w(e, "Reading log sync failed")
+            false
+        }
+    }
+
+    /** True when this phone has read since its days last reached Calibre. */
+    suspend fun readingLogPending(): Boolean =
+        readingDayDao.lastReadAt() > userPreferences.readingLogSyncedAt.first()
 
     // ── Helpers ───────────────────────────────────────────────────────────────
 

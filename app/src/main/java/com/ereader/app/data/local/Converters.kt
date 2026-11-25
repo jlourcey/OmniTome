@@ -21,7 +21,8 @@ class Converters {
     fun fileTypeToString(value: FileType): String = value.name
 
     @TypeConverter
-    fun stringToFileType(value: String): FileType = FileType.valueOf(value)
+    fun stringToFileType(value: String): FileType =
+        runCatching { FileType.valueOf(value) }.getOrDefault(FileType.UNKNOWN)
 
     @TypeConverter
     fun bookSourceToString(value: BookSource): String = value.name

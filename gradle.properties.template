@@ -20,3 +20,8 @@ kotlin.code.style=official
 # Find the IP in Calibre → Preferences → Sharing over the net → Current IP address
 # Default port is 8080.
 calibre.base.url=http://192.168.68.60:8080
+
+# Android Gradle Plugin 9 has Kotlin built in; this project still applies the
+# Kotlin plugin itself, so the built-in one is switched off.
+android.builtInKotlin=false
+android.newDsl=false

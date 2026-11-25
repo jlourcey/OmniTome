@@ -102,6 +102,14 @@ interface BookDao {
 
     // ── One-shot reads ────────────────────────────────────────────────────────
 
+    /** The book you opened most recently that isn't finished (any library) — for the widget. */
+    @Query("""
+        SELECT * FROM books
+        WHERE lastReadAt IS NOT NULL AND isRead = 0 AND readingProgress < 0.98
+        ORDER BY lastReadAt DESC LIMIT 1
+    """)
+    suspend fun getMostRecentInProgress(): BookEntity?
+
     @Query("SELECT * FROM books WHERE id = :id")
     suspend fun getById(id: String): BookEntity?
 
@@ -168,14 +176,69 @@ interface BookDao {
     @Query("UPDATE books SET isDownloaded = :downloaded, localFilePath = :path WHERE id = :id")
     suspend fun setDownloaded(id: String, downloaded: Boolean, path: String?)
 
+    /** After Calibre converted a MOBI/AZW3/comic: read the new EPUB from now on. */
+    @Query("UPDATE books SET fileUrl = :fileUrl, fileType = :fileType WHERE id = :id")
+    suspend fun setFile(id: String, fileUrl: String, fileType: com.ereader.app.data.local.entity.FileType)
+
     // ── Read status ───────────────────────────────────────────────────────────
 
     /**
      * Sets the Read status from inside OmniTome ("Mark as Read" / "Mark as Unread",
      * or reaching the last page). [dirty] = still needs sending to Calibre.
+     *
+     * Also keeps the Times Read count:
+     *  - Unread → Read adds one finish waiting to go to Calibre ([BookEntity.pendingReads]).
+     *  - Read → Unread before that finish was sent takes it back (a mis-tap).
      */
-    @Query("UPDATE books SET isRead = :isRead, readAt = :readAt, readStatusDirty = :dirty WHERE id = :id")
+    @Query("""
+        UPDATE books
+        SET isRead          = :isRead,
+            readAt          = :readAt,
+            readStatusDirty = :dirty,
+            pendingReads    = CASE
+                WHEN :isRead = 1 AND isRead = 0 THEN pendingReads + 1
+                WHEN :isRead = 0 AND isRead = 1 AND pendingReads > 0 THEN pendingReads - 1
+                ELSE pendingReads
+            END
+        WHERE id = :id
+    """)
     suspend fun setReadStatus(id: String, isRead: Boolean, readAt: Long?, dirty: Boolean)
+
+    /**
+     * Called after Calibre accepted a new Times Read value:
+     * [newTimesRead] is what Calibre now holds, and [sentPending] of the
+     * waiting finishes were included in it.
+     */
+    @Query("""
+        UPDATE books
+        SET timesRead    = :newTimesRead,
+            pendingReads = MAX(pendingReads - :sentPending, 0)
+        WHERE id = :id
+    """)
+    suspend fun applyTimesReadPushed(id: String, newTimesRead: Int, sentPending: Int)
+
+    /** Copies Calibre's Times Read count during library sync. */
+    @Query("""
+        UPDATE books
+        SET timesRead = :timesRead
+        WHERE calibreBookId = :calibreBookId
+          AND (libraryKey = :libraryKey OR libraryKey IS NULL)
+    """)
+    suspend fun applyCalibreTimesRead(libraryKey: String, calibreBookId: Int, timesRead: Int)
+
+    // ── Star rating ("Rate Book") ─────────────────────────────────────────────
+
+    /** Sets the rating from inside OmniTome. [dirty] = still needs sending to Calibre. */
+    @Query("UPDATE books SET calibreRating = :stars, ratingDirty = :dirty WHERE id = :id")
+    suspend fun setRating(id: String, stars: Float?, dirty: Boolean)
+
+    /** Called after Calibre accepted the rating — only if it wasn't changed again meanwhile. */
+    @Query("UPDATE books SET ratingDirty = 0 WHERE id = :id AND calibreRating IS :sentStars")
+    suspend fun clearRatingDirty(id: String, sentStars: Float?)
+
+    /** Calibre-linked books whose rating changed in OmniTome and hasn't reached Calibre. */
+    @Query("SELECT * FROM books WHERE ratingDirty = 1 AND calibreBookId IS NOT NULL")
+    suspend fun getBooksWithUnsyncedRating(): List<BookEntity>
 
     /** Called after Calibre accepted the read status — stops it being sent again. */
     @Query("UPDATE books SET readStatusDirty = 0 WHERE id = :id AND isRead = :sentIsRead")
@@ -208,6 +271,45 @@ interface BookDao {
         calibreReadAt: Long?
     )
 
+    /**
+     * Copies Calibre's "Date added" and rating onto our copy of the book during
+     * library sync (cover badges). A rating changed with "Rate Book" that hasn't
+     * reached Calibre yet is kept instead of Calibre's.
+     */
+    @Query("""
+        UPDATE books
+        SET calibreAddedAt = :addedAt,
+            calibreRating  = CASE WHEN ratingDirty = 1 THEN calibreRating ELSE :rating END
+        WHERE calibreBookId = :calibreBookId
+          AND (libraryKey = :libraryKey OR libraryKey IS NULL)
+    """)
+    suspend fun applyCalibreBadgeData(
+        libraryKey: String,
+        calibreBookId: Int,
+        addedAt: Long?,
+        rating: Float?
+    )
+
+    // ── Automatic offline copy ────────────────────────────────────────────────
+
+    @Query("UPDATE books SET autoOffline = :auto, autoOfflineOptOut = :optOut WHERE id = :id")
+    suspend fun setAutoOffline(id: String, auto: Boolean, optOut: Boolean)
+
+    /** Finished books whose offline copy was saved automatically — to be cleaned up. */
+    @Query("SELECT * FROM books WHERE autoOffline = 1 AND isDownloaded = 1 AND isRead = 1")
+    suspend fun getFinishedAutoOfflineBooks(): List<BookEntity>
+
+    // ── Shelves sync ──────────────────────────────────────────────────────────
+
+    @Query("UPDATE books SET shelvesDirty = :dirty WHERE id = :id")
+    suspend fun setShelvesDirty(id: String, dirty: Boolean)
+
+    @Query("SELECT * FROM books WHERE shelvesDirty = 1 AND calibreBookId IS NOT NULL")
+    suspend fun getBooksWithUnsyncedShelves(): List<BookEntity>
+
+    @Query("SELECT * FROM books WHERE calibreBookId = :calibreBookId AND (libraryKey = :libraryKey OR libraryKey IS NULL) LIMIT 1")
+    suspend fun findByCalibreId(libraryKey: String, calibreBookId: Int): BookEntity?
+
     /** Records a successful notes sync to Calibre. */
     @Query("UPDATE books SET notesSyncedAt = :time WHERE id = :id")
     suspend fun setNotesSyncedAt(id: String, time: Long)
@@ -233,6 +335,10 @@ interface BookDao {
      */
     @Query("UPDATE books SET libraryKey = :libraryKey WHERE source = 'CALIBRE' AND libraryKey IS NULL")
     suspend fun claimUnassignedCalibreBooks(libraryKey: String)
+
+    /** Removes OmniTome reading-log entries that came in from Calibre (they aren't books). */
+    @Query("DELETE FROM books WHERE source = 'CALIBRE' AND title LIKE :titlePrefix || '%'")
+    suspend fun deleteReadingLogEntries(titlePrefix: String)
 
     /** Hard-delete a book by its ID (used after deduplication to remove spare rows). */
     @Query("DELETE FROM books WHERE id = :id")

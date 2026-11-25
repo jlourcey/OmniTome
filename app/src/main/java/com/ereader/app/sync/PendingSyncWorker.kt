@@ -20,7 +20,8 @@ import timber.log.Timber
  *  1. Nothing waiting → done.
  *  2. Quick check that the Calibre server answers. Not reachable (e.g. you're on
  *     mobile data away from home) → try again in 15 minutes.
- *  3. Sends notes, deleted notes and reading positions, then Read statuses.
+ *  3. Sends notes, deleted notes and reading positions, then Read statuses,
+ *     then the days you read (for the reading streak on your other devices).
  *  4. Anything that still didn't go through → try again in 15 minutes.
  */
 class PendingSyncWorker(
@@ -65,11 +66,25 @@ class PendingSyncWorker(
                 else -> Unit
             }
         }
-        Timber.d("Auto-sync: sent notes/page for $notes book(s), Read status for $read book(s)")
+        // Star ratings ("Rate Book")
+        var rated = 0
+        var ratingFailed = false
+        deps.bookDao().getBooksWithUnsyncedRating().forEach { book ->
+            when (deps.notesSync().pushRating(book.id)) {
+                ReadPushResult.Synced    -> rated++
+                is ReadPushResult.Failed -> ratingFailed = true
+                else -> Unit
+            }
+        }
+        Timber.d("Auto-sync: sent notes/page for $notes book(s), Read status for $read book(s), ratings for $rated book(s)")
+
+        // Reading-streak days → this login's reading log in Calibre
+        val logFailed = deps.notesSync().readingLogPending() &&
+                        !deps.notesSync().syncReadingLog(libraryId = null)
 
         // Something still failed (but not just "no Read column") → try again later.
         val notesLeft = deps.bookDao().getBooksWithUnsyncedNotes().isNotEmpty()
-        if (notesLeft || readFailed) scheduler.scheduleRetry()
+        if (notesLeft || readFailed || logFailed || ratingFailed) scheduler.scheduleRetry()
         return Result.success()
     }
 }

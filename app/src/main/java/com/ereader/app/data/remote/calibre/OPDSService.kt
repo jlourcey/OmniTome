@@ -94,6 +94,23 @@ class OPDSService @Inject constructor(
         allBooks
     }
 
+    /**
+     * Preference among formats Calibre converts to EPUB (lower = better):
+     * AZW3 (newest Kindle format, best layout), MOBI, AZW, then comics (CBZ, CBR).
+     * 99 = not something OmniTome asks Calibre to convert.
+     */
+    private fun convertRankFor(type: String, href: String): Int {
+        val fmt = Regex("/get/([^/]+)/", RegexOption.IGNORE_CASE).find(href)?.groupValues?.get(1)?.lowercase()
+        return when {
+            fmt == "azw3" || type.contains("mobi8")            -> 1
+            fmt == "mobi" || type.contains("mobipocket")       -> 2
+            fmt == "azw"  || type.contains("amazon")           -> 3
+            fmt == "cbz"  || type.contains("cbz")              -> 4
+            fmt == "cbr"  || type.contains("cbr")              -> 5
+            else -> 99
+        }
+    }
+
     // ── HTTP helper ───────────────────────────────────────────────────────────
 
     private fun httpGet(url: String): String? {
@@ -208,6 +225,9 @@ class OPDSService @Inject constructor(
         var description: String?   = null
         var tags                   = mutableListOf<String>()   // from <category> elements
         var fileType               = FileType.EPUB
+        // MOBI / AZW3 / comic link, used only if there's no EPUB or PDF (converted on open)
+        var convertUrl             = ""
+        var convertRank            = 99
 
         var event = parser.eventType
         while (event != XmlPullParser.END_DOCUMENT) {
@@ -240,6 +260,11 @@ class OPDSService @Inject constructor(
                                 type.contains("pdf") && downloadUrl.isEmpty() -> {
                                     downloadUrl = fullHref
                                     fileType    = FileType.PDF
+                                }
+                                // Formats Calibre can convert to EPUB, best first.
+                                rel.contains("acquisition") && convertRankFor(type, href) < convertRank -> {
+                                    convertRank = convertRankFor(type, href)
+                                    convertUrl  = fullHref
                                 }
                             }
                         }
@@ -310,6 +335,11 @@ class OPDSService @Inject constructor(
                 }
 
                 XmlPullParser.END_TAG -> if (tag == "entry" && inEntry) {
+                    // No EPUB/PDF but a MOBI/AZW3/comic → Calibre converts it when opened.
+                    if (downloadUrl.isBlank() && convertUrl.isNotBlank()) {
+                        downloadUrl = convertUrl
+                        fileType    = FileType.CONVERT
+                    }
                     if (title.isNotBlank() && downloadUrl.isNotBlank()) {
                         Timber.d("OPDSService: adding book '$title' — series='$series' index=$seriesIndex")
                         books += Book(
@@ -335,6 +365,7 @@ class OPDSService @Inject constructor(
                     series = null; seriesIndex = null; description = null
                     tags = mutableListOf()
                     fileType = FileType.EPUB
+                    convertUrl = ""; convertRank = 99
                 }
             }
             event = parser.next()
@@ -363,7 +394,15 @@ class OPDSService @Inject constructor(
         /** Calibre's Read value (only meaningful when readColumns.readKey != null). */
         val isRead: Boolean = false,
         /** Calibre's Date Read as epoch ms, or null. */
-        val readAt: Long? = null
+        val readAt: Long? = null,
+        /** The book's shelves from Calibre's Shelves column (only if readColumns.shelvesKey != null). */
+        val shelves: List<String> = emptyList(),
+        /** Calibre's "Date added" (`timestamp`) as epoch ms, or null. */
+        val addedAt: Long? = null,
+        /** Rating in stars, 0–5, or null if unrated. */
+        val rating: Float? = null,
+        /** Calibre's Times Read count (only meaningful when readColumns.timesKey != null). */
+        val timesRead: Int = 0
     )
 
     /**
@@ -386,6 +425,34 @@ class OPDSService @Inject constructor(
      * that only returns books whose metadata contains the word "all" — which
      * is why the JSON API was returning 262 of 312 books before this fix.
      */
+    /**
+     * A Calibre date field (e.g. "timestamp" = Date added) as epoch ms.
+     * Calibre sends ISO-8601 text such as "2026-11-20T19:45:12+00:00".
+     * Its "no date" value is the year 101, so anything before 1900 counts as blank.
+     */
+    private fun parseCalibreDate(book: JSONObject, key: String): Long? {
+        if (book.isNull(key)) return null
+        val raw = book.optString(key).takeIf { it.isNotBlank() } ?: return null
+        val ms = runCatching { java.time.OffsetDateTime.parse(raw).toInstant().toEpochMilli() }
+            .recoverCatching { java.time.Instant.parse(raw).toEpochMilli() }
+            .getOrNull() ?: return null
+        return ms.takeIf { it > -2_208_988_800_000L }
+    }
+
+    /**
+     * The book's rating in stars (0–5), or null if unrated.
+     * /ajax/books normally sends stars already (5.0 = five stars). Calibre stores
+     * ratings as 0–10 internally, so a value above 5 is treated as that scale
+     * and halved (10 → 5 stars).
+     */
+    private fun parseCalibreRating(book: JSONObject): Float? {
+        if (book.isNull("rating")) return null
+        val raw = book.optDouble("rating")
+        if (raw.isNaN() || raw <= 0.0) return null
+        val stars = if (raw > 5.0) raw / 2.0 else raw
+        return stars.coerceAtMost(5.0).toFloat()
+    }
+
     suspend fun fetchSeriesMetadataViaJson(libraryId: String? = null): List<SeriesInfo> = withContext(Dispatchers.IO) {
         val baseUrl = baseUrl()
         if (baseUrl.isBlank()) return@withContext emptyList()
@@ -414,12 +481,18 @@ class OPDSService @Inject constructor(
         }
         Timber.d("OPDSService: JSON API found ${bookIds.size} total books, fetching series metadata…")
 
+        // Which Read / Date Read / Times Read / Shelves columns the user picked in
+        // Settings → Read Tracking (Automatic unless changed). Stored per library.
+        val columnChoice = userPreferences.getReadColumnChoice(
+            libraryId ?: userPreferences.effectiveCalibreLibraryId.first()
+        )
+
         // Step 2 — batch-fetch metadata in chunks of 100 (avoids huge URLs)
         val result = mutableListOf<SeriesInfo>()
         for (chunk in bookIds.chunked(100)) {
             val booksJson = httpGet(
                 "$baseUrl/ajax/books$libPath?ids=${chunk.joinToString(",")}" +
-                "&fields=title,authors,series,series_index,tags&category_urls=false"
+                "&fields=title,authors,series,series_index,tags,timestamp,rating&category_urls=false"
             ) ?: continue
 
             try {
@@ -451,13 +524,13 @@ class OPDSService @Inject constructor(
 
                     // Read status lives in a custom column ("user_metadata") — see CalibreReadColumns.
                     val userMeta    = book.optJSONObject("user_metadata")
-                    val readColumns = CalibreReadColumns.detect(userMeta)
+                    val readColumns = CalibreReadColumns.detect(userMeta, columnChoice)
                     val isRead      = readColumns.readKey?.let { CalibreReadColumns.readValue(userMeta, it) } ?: false
                     val readAt      = CalibreReadColumns.dateValue(userMeta, readColumns.dateKey)
 
                     // Emit a SeriesInfo for every book — even if it has no series
                     // or tags — so we can always back-fill the calibreBookId.
-                    if (title.isNotBlank()) {
+                    if (title.isNotBlank() && !CalibreReadingLog.isLogTitle(title)) {
                         result += SeriesInfo(
                             normalizedTitle  = title.normalize(),
                             normalizedAuthor = author.normalize(),
@@ -467,7 +540,11 @@ class OPDSService @Inject constructor(
                             calibreBookId    = idStr.toIntOrNull() ?: 0,
                             readColumns      = readColumns,
                             isRead           = isRead,
-                            readAt           = readAt
+                            readAt           = readAt,
+                            shelves          = CalibreReadColumns.shelvesValue(userMeta, readColumns.shelvesKey),
+                            addedAt          = parseCalibreDate(book, "timestamp"),
+                            rating           = parseCalibreRating(book),
+                            timesRead        = CalibreReadColumns.timesValue(userMeta, readColumns.timesKey)
                         )
                     }
                 }

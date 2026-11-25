@@ -7,8 +7,13 @@ import androidx.room.PrimaryKey
 
 // ── Enums stored as strings in the database ───────────────────────────────────
 
-/** The file format of the book. */
-enum class FileType { EPUB, PDF, UNKNOWN }
+/**
+ * The file format of the book.
+ * CONVERT = Calibre only has it as MOBI, AZW3/AZW or a comic (CBZ/CBR). It's
+ * converted to EPUB by your Calibre server the first time you open or save it,
+ * then becomes EPUB (Calibre keeps the new EPUB too).
+ */
+enum class FileType { EPUB, PDF, UNKNOWN, CONVERT }
 
 /** Where this book originally came from. */
 enum class BookSource { CALIBRE, GOOGLE_DRIVE, LOCAL }
@@ -134,6 +139,61 @@ data class BookEntity(
      */
     @ColumnInfo(defaultValue = "0")
     val readStatusDirty: Boolean = false,
+
+    /** Shelves changed in OmniTome and not yet sent to Calibre's "Shelves" column. */
+    @ColumnInfo(defaultValue = "0")
+    val shelvesDirty: Boolean = false,
+
+    // ── Automatic offline copy ────────────────────────────────────────────────
+    /**
+     * True when the offline copy was saved automatically because you opened the
+     * book (not by "Read Offline"). Automatic copies are removed once the book is
+     * finished; ones you saved yourself are never removed automatically.
+     */
+    @ColumnInfo(defaultValue = "0")
+    val autoOffline: Boolean = false,
+
+    /** You removed an automatic copy — don't save this book automatically again. */
+    @ColumnInfo(defaultValue = "0")
+    val autoOfflineOptOut: Boolean = false,
+
+    // ── Cover badges (copied from Calibre on sync; never sent back) ──────────
+    /**
+     * Calibre's "Date added" (its `timestamp` field) as epoch ms. Drives the
+     * "New" cover badge. NULL for Drive / local books, or before the first sync.
+     */
+    val calibreAddedAt: Long?  = null,
+
+    /**
+     * The book's rating in stars, 0–5 (half stars allowed, e.g. 4.5). Copied
+     * from Calibre on sync, and set from OmniTome with "Rate Book" (then sent
+     * back to Calibre). Drives the "Favorite" (fire) cover badge at 5 stars.
+     * NULL = unrated.
+     */
+    val calibreRating: Float?  = null,
+
+    /**
+     * True when the rating was changed in OmniTome ("Rate Book") and hasn't
+     * reached Calibre yet. While true, Calibre's rating is NOT copied over ours.
+     */
+    @ColumnInfo(defaultValue = "0")
+    val ratingDirty: Boolean   = false,
+
+    // ── Times Read ────────────────────────────────────────────────────────────
+    /**
+     * How many times the book has been read, as last copied from Calibre's
+     * "Times Read" column (0 if the library has no such column).
+     */
+    @ColumnInfo(defaultValue = "0")
+    val timesRead: Int         = 0,
+
+    /**
+     * Finishes recorded in OmniTome that haven't been added to Calibre's
+     * "Times Read" count yet. Sent along with the Read status.
+     * The number shown is [timesRead] + [pendingReads].
+     */
+    @ColumnInfo(defaultValue = "0")
+    val pendingReads: Int      = 0,
 
     // ── Housekeeping ──────────────────────────────────────────────────────────
     val addedAt: Long          = System.currentTimeMillis(),

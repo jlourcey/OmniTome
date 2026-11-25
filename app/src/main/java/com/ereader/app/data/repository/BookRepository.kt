@@ -9,12 +9,14 @@ import com.ereader.app.data.local.entity.BookSource
 import com.ereader.app.data.local.entity.FileType
 import com.ereader.app.data.preferences.UserPreferences
 import com.ereader.app.data.remote.calibre.CalibreReadColumns
+import com.ereader.app.data.remote.calibre.CalibreReadingLog
 import com.ereader.app.data.remote.calibre.CalibreSyncService
 import com.ereader.app.data.remote.calibre.CalibreUploadService
 import com.ereader.app.data.remote.calibre.OPDSService
 import com.ereader.app.data.remote.drive.DriveService
 import com.ereader.app.domain.model.Book
 import com.ereader.app.domain.model.ReadingStreak
+import com.ereader.app.domain.model.SmartShelf
 import com.ereader.app.domain.model.normalize
 import com.ereader.app.domain.model.toDomain
 import com.ereader.app.domain.model.toEntity
@@ -78,6 +80,8 @@ class BookRepository @Inject constructor(
     private val userPreferences: UserPreferences,
     private val calibreSyncService: CalibreSyncService,
     private val syncScheduler: SyncScheduler,
+    private val shelfRepository: ShelfRepository,
+    private val searchIndexer: SearchIndexer,
     @ApplicationContext private val appContext: Context
 ) {
 
@@ -202,6 +206,9 @@ class BookRepository @Inject constructor(
     suspend fun syncLibrary() {
         Timber.d("Library sync started")
 
+        // Finished books: remove their automatic offline copies.
+        runCatching { cleanUpFinishedAutoDownloads() }.onFailure { Timber.w(it, "Auto-download cleanup failed") }
+
         // ── Phase 0: which Calibre library? ───────────────────────────────────
         val libraryId = resolveCalibreLibrary()
         Timber.d("Syncing Calibre library: ${libraryId ?: "(server default)"}")
@@ -216,7 +223,9 @@ class BookRepository @Inject constructor(
             .onFailure { Timber.e(it, "Google Drive fetch failed") }
             .getOrDefault(emptyList())
 
-        val allFetched = calibreBooks + driveBooks
+        // OmniTome's own reading-log entries live in Calibre but aren't books.
+        bookDao.deleteReadingLogEntries(CalibreReadingLog.TITLE_PREFIX)
+        val allFetched = (calibreBooks + driveBooks).filterNot { CalibreReadingLog.isLogTitle(it.title) }
         Timber.d("Fetched ${allFetched.size} total books (Calibre: ${calibreBooks.size}, Drive: ${driveBooks.size})")
 
         allFetched.forEach { book ->
@@ -259,6 +268,28 @@ class BookRepository @Inject constructor(
                             isRead        = info.isRead,
                             calibreReadAt = info.readAt
                         )
+                    }
+                    // Cover badges: Calibre's date added + rating (a rating changed with
+                    // "Rate Book" and not sent yet is kept — see applyCalibreBadgeData).
+                    if (info.calibreBookId > 0) {
+                        bookDao.applyCalibreBadgeData(
+                            libraryKey    = libraryId.orEmpty(),
+                            calibreBookId = info.calibreBookId,
+                            addedAt       = info.addedAt,
+                            rating        = info.rating
+                        )
+                    }
+                    // Times Read count from Calibre's "Times Read" column, if it has one.
+                    if (info.calibreBookId > 0 && info.readColumns.timesKey != null) {
+                        bookDao.applyCalibreTimesRead(
+                            libraryKey    = libraryId.orEmpty(),
+                            calibreBookId = info.calibreBookId,
+                            timesRead     = info.timesRead
+                        )
+                    }
+                    // Shelves from Calibre's "Shelves" column, if the library has one.
+                    if (info.calibreBookId > 0 && info.readColumns.shelvesKey != null) {
+                        shelfRepository.applyFromCalibre(libraryId.orEmpty(), info.calibreBookId, info.shelves)
                     }
                     // Always back-fill series (Calibre is the source of truth)
                     if (info.seriesName.isNotBlank()) {
@@ -304,7 +335,28 @@ class BookRepository @Inject constructor(
             runCatching { notesSync.syncAllPendingReadStatus(libraryId, readColumns) }
                 .onSuccess { if (it > 0) Timber.d("Synced Read status for $it book(s) to Calibre") }
                 .onFailure { Timber.e(it, "Automatic Read status sync failed") }
+
+            // Shelves changed in OmniTome → Calibre's Shelves column.
+            runCatching { shelfRepository.pushAllPending(libraryId, readColumns) }
+                .onFailure { Timber.e(it, "Shelves sync failed") }
+
+            // Star ratings changed in OmniTome ("Rate Book").
+            runCatching { notesSync.syncAllPendingRatings(libraryId) }
+                .onSuccess { if (it > 0) Timber.d("Synced ratings for $it book(s) to Calibre") }
+                .onFailure { Timber.e(it, "Automatic rating sync failed") }
+
+            // Reading streak: swap reading days with the other devices via Calibre.
+            notesSync.syncReadingLog(libraryId)
+
+            // Smart Shelves: re-run their Calibre searches for this library.
+            if (libraryId != null) {
+                runCatching { refreshSmartShelves(libraryId) }
+                    .onFailure { Timber.e(it, "Smart Shelf refresh failed") }
+            }
         }
+
+        // Make any saved/imported EPUBs searchable that aren't yet.
+        runCatching { searchIndexer.indexMissing() }.onFailure { Timber.w(it, "Search indexing failed") }
 
         Timber.d("Library sync complete")
     }
@@ -389,6 +441,9 @@ class BookRepository @Inject constructor(
         language      = if (language != "en") language else other.language,
         // If already downloaded, keep our local path; otherwise take the remote URL
         fileUrl       = if (isDownloaded && localFilePath != null) fileUrl else other.fileUrl,
+        // Format follows the server (e.g. MOBI converted to EPUB in Calibre) unless
+        // the phone already holds a copy in the current format.
+        fileType      = if (isDownloaded && localFilePath != null) fileType else other.fileType,
         // Preserve Calibre's integer ID from whichever record has it
         calibreBookId = calibreBookId ?: other.calibreBookId,
         libraryKey    = libraryKey    ?: other.libraryKey,
@@ -457,6 +512,13 @@ class BookRepository @Inject constructor(
         return false
     }
 
+    /** A Calibre library's display name ("Max's Library") from its id, for messages. */
+    suspend fun libraryDisplayName(libraryKey: String?): String? {
+        if (libraryKey == null) return null
+        return userPreferences.knownCalibreLibraries.first().firstOrNull { it.first == libraryKey }?.second
+            ?: libraryKey.replace('_', ' ')
+    }
+
     /**
      * "Mark as Read" / "Mark as Unread".
      * @param finishedToday  true = finished now (shows on this year's shelf);
@@ -487,6 +549,89 @@ class BookRepository @Inject constructor(
 
     suspend fun toggleFavorite(bookId: String, isFavorite: Boolean) {
         bookDao.setFavorite(bookId, isFavorite)
+    }
+
+    // ── Star rating ("Rate Book") ─────────────────────────────────────────────
+
+    /**
+     * Rates a book 1–5 stars ([stars] = null clears the rating).
+     * Saved straight away; for Calibre books it's then sent to Calibre's Rating
+     * field if Calibre can be reached, otherwise at the next sync from home.
+     * 5 stars also shows the fire badge on the cover.
+     */
+    suspend fun setRating(book: Book, stars: Int?): ReadPushResult {
+        val linked = book.source == BookSource.CALIBRE && book.calibreBookId != null
+        bookDao.setRating(book.id, stars?.coerceIn(1, 5)?.toFloat(), dirty = linked)
+        if (!linked) return ReadPushResult.NotLinked
+        val result = notesSync.pushRating(book.id)
+        if (result is ReadPushResult.Failed) syncScheduler.schedule()
+        return result
+    }
+
+    // ── Smart Shelves ─────────────────────────────────────────────────────────
+
+    /** Smart Shelves of the library picked in the bookshelf switch. */
+    fun observeSmartShelves(): Flow<List<SmartShelf>> =
+        userPreferences.effectiveCalibreLibraryId.flatMapLatest { lib ->
+            if (lib == null) kotlinx.coroutines.flow.flowOf(emptyList())
+            else userPreferences.observeSmartShelves(lib)
+        }
+
+    /**
+     * Books on one Smart Shelf: the books of the picked library whose Calibre
+     * id was matched by the shelf's search, in the library's title order.
+     */
+    fun observeSmartShelfBooks(shelfId: String): Flow<List<Book>> =
+        combine(observeSmartShelves(), observeAllBooks()) { shelves, books ->
+            val ids = shelves.firstOrNull { it.id == shelfId }?.calibreIds?.toHashSet() ?: emptySet()
+            books.filter { it.calibreBookId != null && it.calibreBookId in ids }
+        }
+
+    /**
+     * Creates a new Smart Shelf, or changes an existing one when [shelfId] is given.
+     * Asks Calibre to run the search first, so a typo is caught straight away.
+     * @return the saved shelf (with how many books matched).
+     */
+    suspend fun saveSmartShelf(shelfId: String?, name: String, query: String): Result<SmartShelf> = runCatching {
+        val lib = userPreferences.effectiveCalibreLibraryId.first()
+            ?: throw IllegalStateException("Sync your Calibre library once before making a Smart Shelf.")
+        val cleanName = name.trim().ifBlank { throw IllegalArgumentException("Give the shelf a name.") }
+        val cleanQuery = query.trim()
+        val ids = calibreSyncService.searchBookIds(cleanQuery, lib)
+        val shelf = SmartShelf(
+            id         = shelfId ?: UUID.randomUUID().toString(),
+            name       = cleanName.take(60),
+            query      = cleanQuery,
+            calibreIds = ids,
+            updatedAt  = System.currentTimeMillis()
+        )
+        val shelves = userPreferences.getSmartShelves(lib)
+        val updated = if (shelves.any { it.id == shelf.id }) shelves.map { if (it.id == shelf.id) shelf else it }
+                      else shelves + shelf
+        userPreferences.saveSmartShelves(lib, updated)
+        shelf
+    }
+
+    suspend fun deleteSmartShelf(shelfId: String) {
+        val lib = userPreferences.effectiveCalibreLibraryId.first() ?: return
+        userPreferences.saveSmartShelves(lib, userPreferences.getSmartShelves(lib).filterNot { it.id == shelfId })
+    }
+
+    /**
+     * Re-runs every Smart Shelf's search so the shelves pick up books added or
+     * changed in Calibre. A shelf whose search fails keeps its last results.
+     */
+    private suspend fun refreshSmartShelves(libraryId: String) {
+        val shelves = userPreferences.getSmartShelves(libraryId)
+        if (shelves.isEmpty()) return
+        val refreshed = shelves.map { shelf ->
+            runCatching { calibreSyncService.searchBookIds(shelf.query, libraryId) }
+                .map { ids -> shelf.copy(calibreIds = ids, updatedAt = System.currentTimeMillis()) }
+                .onFailure { Timber.w(it, "Smart Shelf '${shelf.name}' search failed — keeping last results") }
+                .getOrDefault(shelf)
+        }
+        userPreferences.saveSmartShelves(libraryId, refreshed)
+        Timber.d("Refreshed ${refreshed.size} Smart Shelf/Shelves")
     }
 
     /**
@@ -582,9 +727,11 @@ class BookRepository @Inject constructor(
      * points at the file. ReaderViewModel.ensureLocalFile() already checks those
      * two fields first, so the reader opens the saved copy with no network.
      */
-    suspend fun downloadForOffline(book: Book): Result<Unit> = withContext(Dispatchers.IO) {
+    suspend fun downloadForOffline(original: Book): Result<Unit> = withContext(Dispatchers.IO) {
         // Imported books already live on the phone — nothing to do.
-        if (book.source == BookSource.LOCAL) return@withContext Result.success(Unit)
+        if (original.source == BookSource.LOCAL) return@withContext Result.success(Unit)
+        // MOBI/AZW3/comic → ask Calibre for an EPUB first.
+        val book = runCatching { convertIfNeeded(original) }.getOrElse { return@withContext Result.failure(it) }
         // Already saved and the file is still there — nothing to do.
         if (book.isDownloaded && book.localFilePath != null && File(book.localFilePath).exists()) {
             return@withContext Result.success(Unit)
@@ -612,7 +759,12 @@ class BookRepository @Inject constructor(
             if (!partial.renameTo(dest)) throw IOException("Could not save the file on the phone")
 
             bookDao.setDownloaded(book.id, true, dest.absolutePath)
+            // Saved on purpose: never removed automatically (autoSaveForOffline
+            // sets the automatic flag again right after when it's the one calling).
+            bookDao.setAutoOffline(book.id, auto = false, optOut = false)
             Timber.d("Saved '${book.title}' for offline reading -> ${dest.absolutePath}")
+            // Make it searchable (EPUBs only).
+            if (book.fileType == FileType.EPUB) runCatching { searchIndexer.index(book.id, dest) }
             Result.success(Unit)
         } catch (e: CancellationException) {
             partial.delete()
@@ -626,6 +778,74 @@ class BookRepository @Inject constructor(
         }
     }
 
+    // ── MOBI / AZW3 / comics ──────────────────────────────────────────────────
+
+    /**
+     * Books Calibre only has as MOBI, AZW3/AZW or a comic: asks the Calibre
+     * server to make an EPUB (it keeps both), then points the book at the EPUB.
+     * Returns the updated book; books in other formats are returned unchanged.
+     * [onProgress] gets 0.0–1.0 while Calibre converts.
+     */
+    suspend fun convertIfNeeded(book: Book, onProgress: (Float) -> Unit = {}): Book {
+        if (book.fileType != FileType.CONVERT) return book
+        val getPart = Regex("/get/([^/]+)/(\\d+)", RegexOption.IGNORE_CASE).find(book.fileUrl)
+            ?: throw IOException("Can't tell which format Calibre has this book in")
+        val inputFormat = getPart.groupValues[1]
+        val calibreId = book.calibreBookId ?: getPart.groupValues[2].toInt()
+        calibreSyncService.convertToEpub(calibreId, book.libraryKey, inputFormat, onProgress)
+        // Same download address, EPUB instead of the old format.
+        val epubUrl = book.fileUrl.replaceRange(getPart.groups[1]!!.range, "EPUB")
+        bookDao.setFile(book.id, epubUrl, FileType.EPUB)
+        Timber.d("'${book.title}' converted $inputFormat → EPUB by Calibre")
+        return book.copy(fileUrl = epubUrl, fileType = FileType.EPUB)
+    }
+
+    // ── Automatic offline copy ────────────────────────────────────────────────
+
+    /**
+     * Opening a Calibre or Drive book saves it for offline reading automatically,
+     * so it's there even if you forgot "Read Offline" before leaving home.
+     * The reader has usually just downloaded the file, so that copy is reused
+     * instead of downloading again. Skipped for imported books, books already
+     * saved, finished books, and books whose automatic copy you removed.
+     */
+    suspend fun autoSaveForOffline(bookId: String, readerFile: File?) = withContext(Dispatchers.IO) {
+        val e = bookDao.getById(bookId) ?: return@withContext
+        if (e.source == BookSource.LOCAL || e.isRead || e.autoOfflineOptOut) return@withContext
+        if (e.isDownloaded && e.localFilePath != null && File(e.localFilePath).exists()) return@withContext
+        if (bookId in _downloadingIds.value) return@withContext
+
+        val ext  = if (e.fileType == FileType.PDF) "pdf" else "epub"
+        val dest = File(offlineDir, "$bookId.$ext")
+        val saved = if (readerFile != null && readerFile.exists() && readerFile.length() > 0 &&
+                        !readerFile.absolutePath.startsWith(offlineDir.absolutePath)) {
+            runCatching { readerFile.copyTo(dest, overwrite = true); true }
+                .onFailure { Timber.w(it, "Couldn't reuse the reader's copy") }.getOrDefault(false)
+        } else false
+
+        if (saved) {
+            bookDao.setDownloaded(bookId, true, dest.absolutePath)
+            if (e.fileType == FileType.EPUB) runCatching { searchIndexer.index(bookId, dest) }
+        } else if (downloadForOffline(e.toDomain()).isFailure) {
+            return@withContext
+        }
+        bookDao.setAutoOffline(bookId, auto = true, optOut = false)
+        Timber.d("Saved '${e.title}' for offline automatically (you're reading it)")
+    }
+
+    /**
+     * Removes automatic offline copies of books you've finished. Runs at the
+     * start of a library sync (not at the last page, so a book is never deleted
+     * while it's open). Notes and position stay in the app and sync as usual.
+     */
+    private suspend fun cleanUpFinishedAutoDownloads() {
+        bookDao.getFinishedAutoOfflineBooks().forEach { e ->
+            removeOfflineCopy(e.toDomain(), byUser = false)
+            bookDao.setAutoOffline(e.id, auto = false, optOut = false)
+            Timber.d("Finished '${e.title}' — removed its automatic offline copy")
+        }
+    }
+
     // ── Remove Download ───────────────────────────────────────────────────────
 
     /**
@@ -633,8 +853,10 @@ class BookRepository @Inject constructor(
      * library, along with its notes, bookmarks, and reading position.
      * Also clears the reader's temporary cached copy so the file is truly gone.
      */
-    suspend fun removeOfflineCopy(book: Book) = withContext(Dispatchers.IO) {
+    suspend fun removeOfflineCopy(book: Book, byUser: Boolean = true) = withContext(Dispatchers.IO) {
         if (book.source == BookSource.LOCAL) return@withContext   // imported books ARE the phone copy
+        // You removed it yourself → don't save this book automatically again.
+        if (byUser) bookDao.setAutoOffline(book.id, auto = false, optOut = true)
         book.localFilePath?.let { path ->
             runCatching { File(path).delete() }
                 .onFailure { Timber.w(it, "Could not delete offline file: $path") }
@@ -642,6 +864,7 @@ class BookRepository @Inject constructor(
         val ext = if (book.fileType == FileType.PDF) "pdf" else "epub"
         File(appContext.cacheDir, "books/${book.id}.$ext").let { if (it.exists()) it.delete() }
         bookDao.setDownloaded(book.id, false, null)
+        searchIndexer.remove(book.id)   // no longer on the phone → not searchable
         Timber.d("Removed offline copy of '${book.title}'")
     }
 
@@ -663,6 +886,8 @@ class BookRepository @Inject constructor(
      */
     suspend fun deleteBook(book: Book) {
         bookDao.deleteById(book.id)
+        appDatabase.shelfDao().removeBookFromAll(book.id)
+        runCatching { searchIndexer.remove(book.id) }
 
         // Delete the book file for locally imported books
         book.localFilePath?.let { path ->

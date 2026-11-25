@@ -16,6 +16,8 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.layout.boundsInWindow
+import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -32,7 +34,8 @@ import com.ereader.app.ui.theme.ReaderSepiaBackground
 // ── Reader preference types ───────────────────────────────────────────────────
 
 enum class ReaderTheme      { DAY, NIGHT, SEPIA, PAPER }
-enum class ReaderFontFamily { SERIF, SANS, MONO }
+/** DYSLEXIC = OpenDyslexic, the dyslexia-friendly font that comes with Readium. */
+enum class ReaderFontFamily { SERIF, SANS, MONO, DYSLEXIC }
 
 /** Background colour for the HUD bars — matches the active reading theme at 96% opacity. */
 internal fun readerHudSurface(theme: ReaderTheme): Color = when (theme) {
@@ -85,7 +88,9 @@ fun ReaderControlsHud(
     onPauseReading: () -> Unit,
     onResumeReading: () -> Unit,
     onStopReading: () -> Unit,
-    onClose: () -> Unit
+    onClose: () -> Unit,
+    /** Jump to a point in the book, 0.0–1.0 (the position slider). */
+    onSeekTo: (Float) -> Unit = {}
 ) {
     // ── ViewModel state ───────────────────────────────────────────────────────
     val pendingAnnotation  by viewModel.pendingAnnotation.collectAsState()
@@ -97,6 +102,7 @@ fun ReaderControlsHud(
     val showBookmarks      by viewModel.showBookmarks.collectAsState()
     val ttsState           by viewModel.ttsState.collectAsState()
     val readingProgress    by viewModel.readingProgress.collectAsState()
+    val readingStats       by viewModel.readingStats.collectAsState()
 
     // Reader display preferences — sourced from ViewModel so the Activity can
     // observe the same values and push them into the WebView via JS injection.
@@ -150,7 +156,7 @@ fun ReaderControlsHud(
                 color           = readerHudSurface(theme),
                 contentColor    = readerHudOnSurface(theme),
                 shadowElevation = 4.dp,
-                modifier        = Modifier.fillMaxWidth()
+                modifier        = Modifier.fillMaxWidth().controlArea(viewModel, "top_bar")
             ) {
                 Row(
                     modifier          = Modifier
@@ -209,34 +215,6 @@ fun ReaderControlsHud(
                         Icon(Icons.Default.FormatListBulleted, contentDescription = "Table of contents")
                     }
 
-                    // ── Read aloud ────────────────────────────────────────────
-                    // Single speaker icon when idle → play/pause + stop when active.
-                    when (ttsState) {
-                        TtsState.IDLE -> {
-                            IconButton(onClick = {
-                                onStartReading()
-                                viewModel.hideHud()
-                            }) {
-                                Icon(Icons.Default.VolumeUp, contentDescription = "Read aloud")
-                            }
-                        }
-                        TtsState.PLAYING -> {
-                            IconButton(onClick = { onPauseReading() }) {
-                                Icon(Icons.Default.Pause, contentDescription = "Pause reading")
-                            }
-                            IconButton(onClick = { onStopReading() }) {
-                                Icon(Icons.Default.Stop, contentDescription = "Stop reading")
-                            }
-                        }
-                        TtsState.PAUSED -> {
-                            IconButton(onClick = { onResumeReading() }) {
-                                Icon(Icons.Default.PlayArrow, contentDescription = "Resume reading")
-                            }
-                            IconButton(onClick = { onStopReading() }) {
-                                Icon(Icons.Default.Stop, contentDescription = "Stop reading")
-                            }
-                        }
-                    }
 
                     // ── Bookmark toggle — tap to add/remove current-page bookmark ──
                     IconButton(onClick = { viewModel.toggleBookmark() }) {
@@ -279,6 +257,29 @@ fun ReaderControlsHud(
                             }
                         }
                     }
+
+                    // ── More (⋮): less-used actions, e.g. Read aloud ───────────
+                    Box {
+                        var moreOpen by remember { mutableStateOf(false) }
+                        IconButton(onClick = { moreOpen = true }) {
+                            Icon(Icons.Default.MoreVert, contentDescription = "More")
+                        }
+                        DropdownMenu(expanded = moreOpen, onDismissRequest = { moreOpen = false }) {
+                            DropdownMenuItem(
+                                text        = { Text(if (ttsState == TtsState.IDLE) "Read aloud" else "Stop reading aloud") },
+                                leadingIcon = { Icon(Icons.Default.RecordVoiceOver, contentDescription = null) },
+                                onClick     = {
+                                    moreOpen = false
+                                    if (ttsState == TtsState.IDLE) {
+                                        // Starts on the page you're on; a small player
+                                        // appears at the bottom while it reads.
+                                        onStartReading()
+                                        viewModel.hideHud()
+                                    } else onStopReading()
+                                }
+                            )
+                        }
+                    }
                 }
             }
         }
@@ -294,30 +295,51 @@ fun ReaderControlsHud(
                 color           = readerHudSurface(theme),
                 contentColor    = readerHudOnSurface(theme),
                 shadowElevation = 8.dp,
-                modifier        = Modifier.fillMaxWidth()
+                modifier        = Modifier.fillMaxWidth().controlArea(viewModel, "bottom_bar")
             ) {
                 Column(
                     modifier = Modifier
                         .padding(horizontal = 16.dp, vertical = 12.dp)
                         .navigationBarsPadding()
                 ) {
-                    // ── Reading progress ──────────────────────────────────────
-                    if (readingProgress > 0f) {
+                    // ── Reading position: drag to jump anywhere in the book ───
+                    run {
+                        // While dragging, show where you'll land; jump on release.
+                        var dragging by remember { mutableStateOf<Float?>(null) }
+                        val shown = dragging ?: readingProgress
                         Row(
                             verticalAlignment = Alignment.CenterVertically,
                             modifier          = Modifier.fillMaxWidth()
                         ) {
-                            LinearProgressIndicator(
-                                progress   = { readingProgress },
-                                modifier   = Modifier
-                                    .weight(1f)
-                                    .height(4.dp)
-                                    .clip(androidx.compose.foundation.shape.RoundedCornerShape(2.dp)),
-                                trackColor = MaterialTheme.colorScheme.outlineVariant
+                            Slider(
+                                value                 = shown.coerceIn(0f, 1f),
+                                onValueChange         = { dragging = it },
+                                onValueChangeFinished = {
+                                    dragging?.let { onSeekTo(it) }
+                                    dragging = null
+                                },
+                                modifier              = Modifier.weight(1f)
                             )
                             Spacer(modifier = Modifier.width(10.dp))
                             Text(
-                                text  = "${(readingProgress * 100).toInt()}%",
+                                text  = "${(shown * 100).toInt()}%",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                    }
+                    if (readingProgress > 0f) {
+                        // Page X of Y · time left in chapter · time left in book
+                        readingStats?.let { s ->
+                            Spacer(modifier = Modifier.height(6.dp))
+                            Text(
+                                text  = "Page ${s.page} of ${s.pageCount}",
+                                style = MaterialTheme.typography.labelMedium
+                            )
+                            Text(
+                                text  = "${formatMinutes(s.chapterMinutesLeft)} left in chapter \u00B7 " +
+                                        "${formatMinutes(s.bookMinutesLeft)} left in book" +
+                                        if (s.speedIsPersonal) "" else " (typical speed until it learns yours)",
                                 style = MaterialTheme.typography.labelSmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant
                             )
@@ -385,7 +407,7 @@ fun ReaderControlsHud(
                             FilterChip(
                                 selected = fontFamily == fam,
                                 onClick  = { viewModel.setFontFamily(fam) },
-                                label    = { Text(fam.name.lowercase().replaceFirstChar { it.uppercase() }) },
+                                label    = { Text(fam.name.lowercase().replaceFirstChar { it.uppercase() }, maxLines = 1) },
                                 modifier = Modifier.weight(1f)
                             )
                         }
@@ -412,6 +434,16 @@ fun ReaderControlsHud(
             pending   = pending,
             onSave    = { color, note -> viewModel.saveAnnotation(color, note) },
             onDismiss = { viewModel.dismissAnnotationDialog() }
+        )
+    }
+
+    // ── Definition card ("Define" in the selection menu) ─────────────────────
+    val dictionaryCard by viewModel.dictionaryCard.collectAsState()
+    dictionaryCard?.let { card ->
+        DictionarySheet(
+            state       = card,
+            onWikipedia = { viewModel.lookUpOnWikipedia() },
+            onDismiss   = { viewModel.dismissDictionary() }
         )
     }
 
@@ -767,4 +799,17 @@ private fun ThemeChip(
         ),
         modifier = modifier
     )
+}
+
+/**
+ * Tells the reader that this part of the screen is a control bar, so a tap on
+ * it doesn't also show/hide the controls (see ReaderViewModel.isOnControl).
+ */
+@Composable
+internal fun Modifier.controlArea(viewModel: ReaderViewModel, key: String): Modifier {
+    DisposableEffect(key) { onDispose { viewModel.clearControlArea(key) } }
+    return this.onGloballyPositioned { c ->
+        val r = c.boundsInWindow()
+        viewModel.setControlArea(key, r.left, r.top, r.right, r.bottom)
+    }
 }

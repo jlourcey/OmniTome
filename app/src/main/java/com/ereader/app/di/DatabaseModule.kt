@@ -8,6 +8,9 @@ import com.ereader.app.data.local.AppDatabase
 import com.ereader.app.data.local.dao.AnnotationDao
 import com.ereader.app.data.local.dao.BookDao
 import com.ereader.app.data.local.dao.BookmarkDao
+import com.ereader.app.data.local.dao.ReadingDayDao
+import com.ereader.app.data.local.dao.ShelfDao
+import com.ereader.app.data.local.dao.SearchDao
 import dagger.Module
 import dagger.Provides
 import dagger.hilt.InstallIn
@@ -31,6 +34,10 @@ import javax.inject.Singleton
  *                   libraries can live side by side. Nothing is lost.
  *   MIGRATION_7_8 — adds the Read status columns and the `reading_days` table.
  *                   Books you already read to the end become "Read". Nothing is lost.
+ *   MIGRATION_8_9 — adds custom shelves (`shelves`, `shelf_books`),
+ *                   books.shelvesDirty, and books.autoOffline / autoOfflineOptOut
+ *                   (automatic offline copy of the book you're reading), and the
+ *                   full-text search tables (`book_text`, `search_indexed`). Nothing is lost.
  */
 @Module
 @InstallIn(SingletonComponent::class)
@@ -178,6 +185,60 @@ object DatabaseModule {
         }
     }
 
+    /** v8 → v9: custom shelves. Column types mirror ShelfEntity / ShelfBookEntity / BookEntity. */
+    private val MIGRATION_8_9 = object : Migration(8, 9) {
+        override fun migrate(db: SupportSQLiteDatabase) {
+            db.execSQL("ALTER TABLE books ADD COLUMN shelvesDirty INTEGER NOT NULL DEFAULT 0")
+            // Automatic offline copy of the book you're reading
+            db.execSQL("ALTER TABLE books ADD COLUMN autoOffline INTEGER NOT NULL DEFAULT 0")
+            db.execSQL("ALTER TABLE books ADD COLUMN autoOfflineOptOut INTEGER NOT NULL DEFAULT 0")
+            db.execSQL("""
+                CREATE TABLE IF NOT EXISTS shelves (
+                    id        TEXT    NOT NULL PRIMARY KEY,
+                    name      TEXT    NOT NULL,
+                    createdAt INTEGER NOT NULL
+                )
+            """.trimIndent())
+            db.execSQL("CREATE UNIQUE INDEX IF NOT EXISTS index_shelves_name ON shelves (name)")
+            db.execSQL("""
+                CREATE TABLE IF NOT EXISTS shelf_books (
+                    shelfId TEXT    NOT NULL,
+                    bookId  TEXT    NOT NULL,
+                    addedAt INTEGER NOT NULL,
+                    PRIMARY KEY (shelfId, bookId)
+                )
+            """.trimIndent())
+            db.execSQL("CREATE INDEX IF NOT EXISTS index_shelf_books_bookId ON shelf_books (bookId)")
+            // Search inside saved books. Must match Room's own definition exactly.
+            db.execSQL("CREATE VIRTUAL TABLE IF NOT EXISTS `book_text` USING FTS4(`bookId` TEXT NOT NULL, " +
+                "`chapterHref` TEXT NOT NULL, `chapterTitle` TEXT, `text` TEXT NOT NULL, tokenize=unicode61, " +
+                "notindexed=`bookId`, notindexed=`chapterHref`)")
+            db.execSQL("CREATE TABLE IF NOT EXISTS `search_indexed` (`bookId` TEXT NOT NULL, " +
+                "`indexedAt` INTEGER NOT NULL, PRIMARY KEY(`bookId`))")
+        }
+    }
+
+    /** v9 → v10: cover badges — Calibre's date added and rating (both nullable). */
+    private val MIGRATION_9_10 = object : Migration(9, 10) {
+        override fun migrate(db: SupportSQLiteDatabase) {
+            db.execSQL("ALTER TABLE books ADD COLUMN calibreAddedAt INTEGER")
+            db.execSQL("ALTER TABLE books ADD COLUMN calibreRating REAL")
+        }
+    }
+
+    /**
+     * v10 → v11: "Rate Book" (ratings sent back to Calibre) and the Times Read counter.
+     * Every existing book starts at 0 reads; the next library sync copies the
+     * real count over from Calibre's "Times Read" column, if the library has one.
+     */
+    private val MIGRATION_10_11 = object : Migration(10, 11) {
+        override fun migrate(db: SupportSQLiteDatabase) {
+            db.execSQL("ALTER TABLE books ADD COLUMN ratingDirty INTEGER NOT NULL DEFAULT 0")
+            db.execSQL("ALTER TABLE books ADD COLUMN timesRead INTEGER NOT NULL DEFAULT 0")
+            db.execSQL("ALTER TABLE books ADD COLUMN pendingReads INTEGER NOT NULL DEFAULT 0")
+        }
+    }
+
     @Provides
     @Singleton
     fun provideDatabase(@ApplicationContext context: Context): AppDatabase =
@@ -186,7 +247,7 @@ object DatabaseModule {
             AppDatabase::class.java,
             "ereader.db"
         )
-        .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6, MIGRATION_6_7, MIGRATION_7_8)
+        .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6, MIGRATION_6_7, MIGRATION_7_8, MIGRATION_8_9, MIGRATION_9_10, MIGRATION_10_11)
         .fallbackToDestructiveMigrationOnDowngrade()
         .build()
 
@@ -198,4 +259,13 @@ object DatabaseModule {
 
     @Provides
     fun provideBookmarkDao(database: AppDatabase): BookmarkDao = database.bookmarkDao()
+
+    @Provides
+    fun provideReadingDayDao(database: AppDatabase): ReadingDayDao = database.readingDayDao()
+
+    @Provides
+    fun provideShelfDao(database: AppDatabase): ShelfDao = database.shelfDao()
+
+    @Provides
+    fun provideSearchDao(database: AppDatabase): SearchDao = database.searchDao()
 }

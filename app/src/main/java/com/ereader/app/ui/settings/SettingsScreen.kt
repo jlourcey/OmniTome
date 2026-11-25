@@ -150,6 +150,22 @@ class SettingsViewModel @Inject constructor(
         viewModelScope.launch { prefs.saveReaderFontSize(sp) }
     }
 
+    /** Settings → Reader Defaults → "Turn pages with volume keys". */
+    val volumeKeyPageTurns: StateFlow<Boolean> = prefs.volumeKeyPageTurns
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), false)
+
+    fun saveVolumeKeyPageTurns(on: Boolean) {
+        viewModelScope.launch { prefs.saveVolumeKeyPageTurns(on) }
+    }
+
+    /** Settings → App Appearance → "Show cover badges". */
+    val coverBadgesEnabled: StateFlow<Boolean> = prefs.coverBadgesEnabled
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), true)
+
+    fun saveCoverBadgesEnabled(on: Boolean) {
+        viewModelScope.launch { prefs.saveCoverBadgesEnabled(on) }
+    }
+
     fun saveReaderFontFamily(family: String) {
         viewModelScope.launch { prefs.saveReaderFontFamily(family) }
     }
@@ -375,6 +391,15 @@ fun SettingsScreen(
 
             Spacer(Modifier.height(24.dp))
 
+            // ── Section 1b: Read Tracking (which Calibre columns to use) ────
+            SettingsSectionHeader(
+                icon  = Icons.Default.TaskAlt,
+                title = "Read Tracking"
+            )
+            ReadTrackingCard()
+
+            Spacer(Modifier.height(24.dp))
+
             // ── Section 2: App Appearance ──────────────────────────────────
             SettingsSectionHeader(
                 icon  = Icons.Default.Palette,
@@ -384,6 +409,23 @@ fun SettingsScreen(
                 current  = state.appTheme,
                 onChange = viewModel::saveAppTheme
             )
+            Spacer(Modifier.height(12.dp))
+            val coverBadges by viewModel.coverBadgesEnabled.collectAsState()
+            SettingsCard {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Column(Modifier.weight(1f)) {
+                        Text("Show cover badges", color = Color.White, fontSize = 14.sp)
+                        Text("Checkmark = Read, NEW = added to Calibre in the last 14 days " +
+                             "and not read yet, flame = rated 5 stars in Calibre.",
+                            color = TextSecondary, fontSize = 12.sp)
+                    }
+                    Switch(
+                        checked = coverBadges,
+                        onCheckedChange = viewModel::saveCoverBadgesEnabled,
+                        colors = SwitchDefaults.colors(checkedTrackColor = GoldAccent)
+                    )
+                }
+            }
 
             Spacer(Modifier.height(24.dp))
 
@@ -400,6 +442,23 @@ fun SettingsScreen(
                 onFamily     = viewModel::saveReaderFontFamily,
                 onTheme      = viewModel::saveReaderTheme
             )
+            Spacer(Modifier.height(12.dp))
+            val volumeKeys by viewModel.volumeKeyPageTurns.collectAsState()
+            SettingsCard {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Column(Modifier.weight(1f)) {
+                        Text("Turn pages with volume keys", color = Color.White, fontSize = 14.sp)
+                        Text("Volume Down = next page, Volume Up = previous page. " +
+                             "While reading aloud, the keys still change the volume.",
+                            color = TextSecondary, fontSize = 12.sp)
+                    }
+                    Switch(
+                        checked = volumeKeys,
+                        onCheckedChange = viewModel::saveVolumeKeyPageTurns,
+                        colors = SwitchDefaults.colors(checkedTrackColor = GoldAccent)
+                    )
+                }
+            }
 
             Spacer(Modifier.height(24.dp))
 
@@ -426,6 +485,28 @@ fun SettingsScreen(
                 icon  = Icons.Default.Help,
                 title = "FAQ & Help"
             )
+            // Replay the welcome tour (it only shows by itself on first launch).
+            run {
+                var showTour by remember { mutableStateOf(false) }
+                OutlinedButton(
+                    onClick  = { showTour = true },
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 16.dp),
+                    border   = androidx.compose.foundation.BorderStroke(1.dp, Color(0xFFDDBB3A))
+                ) {
+                    Icon(Icons.Default.Explore, contentDescription = null, tint = Color(0xFFDDBB3A))
+                    Spacer(Modifier.width(8.dp))
+                    Text("Take the Tour", color = Color(0xFFDDBB3A))
+                }
+                if (showTour) {
+                    com.ereader.app.ui.welcome.TourDialog(
+                        onFinish  = { showTour = false },
+                        onDismiss = { showTour = false }
+                    )
+                }
+            }
+            Spacer(Modifier.height(12.dp))
             FaqCard()
 
             Spacer(Modifier.height(32.dp))
@@ -741,11 +822,12 @@ private fun ReaderDefaultsCard(
         Text("Default font", color = TextSecondary, fontSize = 12.sp)
         Spacer(Modifier.height(6.dp))
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
-            listOf("SERIF", "SANS", "MONO").forEach { family ->
+            listOf("SERIF", "SANS", "MONO", "DYSLEXIC").forEach { family ->
                 FilterChip(
                     selected = fontFamily == family,
                     onClick  = { onFamily(family) },
-                    label    = { Text(family.lowercase().replaceFirstChar { it.uppercase() }) },
+                    // DYSLEXIC = OpenDyslexic, a font designed to be easier to read with dyslexia
+                    label    = { Text(family.lowercase().replaceFirstChar { it.uppercase() }, maxLines = 1) },
                     colors   = FilterChipDefaults.filterChipColors(
                         selectedContainerColor = GoldAccent,
                         selectedLabelColor     = Color(0xFF060D30)
@@ -764,6 +846,7 @@ private fun ReaderDefaultsCard(
             listOf(
                 "DAY"   to Color(0xFFF5F0E8),
                 "SEPIA" to Color(0xFFF1E7D0),
+                "PAPER" to Color(0xFFF0EBE0),
                 "NIGHT" to Color(0xFF1A1A1A)
             ).forEach { (key, bg) ->
                 val fgColor = if (key == "NIGHT") Color.White else Color(0xFF1A1A1A)
@@ -823,7 +906,8 @@ private fun AboutCard() {
         SettingsRow(
             icon   = Icons.Default.Info,
             label  = "Version",
-            value  = "1.0.0"
+            // Read from versionName in app/build.gradle.kts, so it updates with every build.
+            value  = com.ereader.app.BuildConfig.VERSION_NAME
         )
         HorizontalDivider(color = SettingsDivider, modifier = Modifier.padding(vertical = 10.dp))
         SettingsRow(
@@ -871,6 +955,29 @@ private fun SettingsRow(
 private data class FaqItem(val question: String, val answer: String)
 
 private val faqItems = listOf(
+
+    FaqItem(
+        question = "How do star ratings and Times Read work?",
+        answer   = "Star ratings: press and hold a book → Rate Book, or rate it when you reach the last page. " +
+                   "Ratings are saved to Calibre's own Rating field (your Calibre user needs permission to make changes), " +
+                   "and 5 stars shows the fire badge on the cover.\n\n" +
+                   "Times Read: add an \"Integers\" column called Times Read in Calibre " +
+                   "(Preferences → Add your own columns). Every time you finish a book in OmniTome, " +
+                   "its count goes up by one. If your columns have other names, pick them in " +
+                   "Settings → Read Tracking."
+    ),
+
+    FaqItem(
+        question = "What are Smart Shelves?",
+        answer   = "A Smart Shelf is a saved Calibre search that shows as a shelf on the Shelves tab, next to your own shelves. " +
+                   "Tap \"Smart shelf\" and type a search the same way you would in Calibre's search bar, for example:\n" +
+                   "• #read:false — books you haven't read\n" +
+                   "• rating:>=4 — books rated 4 stars or more\n" +
+                   "• date:>30daysago — added in the last 30 days\n" +
+                   "• search:\"My saved search\" — one of your Calibre saved searches\n\n" +
+                   "Smart Shelves fill themselves: they refresh every time the library syncs and still work offline. " +
+                   "Press and hold one to edit or delete it."
+    ),
 
     FaqItem(
         question = "Can I use OmniTome without Calibre?",

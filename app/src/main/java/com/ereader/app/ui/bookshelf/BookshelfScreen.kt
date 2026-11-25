@@ -68,6 +68,8 @@ fun BookshelfScreen(
     onNotesClick: (Book) -> Unit = {},
     onEditClick: (Book) -> Unit = {},
     onSeriesClick: (String) -> Unit = {},
+    /** Opens "Search inside books". */
+    onSearchInsideBooks: () -> Unit = {},
     viewModel: BookshelfViewModel = hiltViewModel()
 ) {
     val uiState          by viewModel.uiState.collectAsStateWithLifecycle()
@@ -83,6 +85,7 @@ fun BookshelfScreen(
     // Reading streak + books finished this year
     val readingStreak    by viewModel.readingStreak.collectAsStateWithLifecycle()
     val finishedThisYear by viewModel.finishedThisYear.collectAsStateWithLifecycle()
+    val showCoverBadges  by viewModel.showCoverBadges.collectAsStateWithLifecycle()
 
     // Regular views: 4/5/6 columns by screen width
     // Series view: 3 columns so the stacked-cover bundles have room to breathe
@@ -100,7 +103,8 @@ fun BookshelfScreen(
                 searchQuery   = rawSearchQuery,   // immediate — no debounce lag
                 onQueryChange = viewModel::onSearchQueryChange,
                 isSyncing     = uiState.isSyncing,
-                onSyncClick   = viewModel::onSyncRequested
+                onSyncClick   = viewModel::onSyncRequested,
+                onSearchInsideBooks = onSearchInsideBooks
             )
         }
     ) { innerPadding ->
@@ -165,7 +169,10 @@ fun BookshelfScreen(
                         onReadOffline      = viewModel::onReadOffline,
                         onRemoveDownload   = viewModel::onRemoveDownload,
                         onSyncNotes        = viewModel::onSyncNotes,
-                        onMarkRead         = viewModel::onMarkRead
+                        onMarkRead         = viewModel::onMarkRead,
+                        onMessage          = viewModel::showMessage,
+                        showBadges         = showCoverBadges,
+                        onRate             = viewModel::onRate
                     )
                 }
             }
@@ -194,7 +201,8 @@ private fun BookshelfTopBar(
     searchQuery: String,
     onQueryChange: (String) -> Unit,
     isSyncing: Boolean,
-    onSyncClick: () -> Unit
+    onSyncClick: () -> Unit,
+    onSearchInsideBooks: () -> Unit = {}
 ) {
     var searchExpanded by remember { mutableStateOf(false) }
 
@@ -251,6 +259,10 @@ private fun BookshelfTopBar(
                 IconButton(onClick = { searchExpanded = true }) {
                     Icon(Icons.Default.Search, contentDescription = "Search")
                 }
+            }
+            // Search the text inside saved books (not just titles/authors)
+            IconButton(onClick = onSearchInsideBooks) {
+                Icon(Icons.Default.ManageSearch, contentDescription = "Search inside books")
             }
             IconButton(onClick = onSyncClick, enabled = !isSyncing) {
                 if (isSyncing) {
@@ -439,7 +451,10 @@ private fun BookshelfGrid(
     onReadOffline: (Book) -> Unit = {},
     onRemoveDownload: (Book, Boolean) -> Unit = { _, _ -> },
     onSyncNotes: (Book) -> Unit = {},
-    onMarkRead: (Book, Boolean, Boolean) -> Unit = { _, _, _ -> }
+    onMarkRead: (Book, Boolean, Boolean) -> Unit = { _, _, _ -> },
+    onMessage: (String) -> Unit = {},
+    showBadges: Boolean = true,
+    onRate: (Book, Int?) -> Unit = { _, _ -> }
 ) {
     val rows = remember(items, columnCount) { items.chunked(columnCount) }
 
@@ -476,7 +491,10 @@ private fun BookshelfGrid(
                                 onReadOffline     = { onReadOffline(item.book) },
                                 onRemoveDownload  = { syncFirst -> onRemoveDownload(item.book, syncFirst) },
                                 onSyncNotes       = { onSyncNotes(item.book) },
-                                onMarkRead        = { read, today -> onMarkRead(item.book, read, today) }
+                                onMarkRead        = { read, today -> onMarkRead(item.book, read, today) },
+                                onMessage         = onMessage,
+                                showBadges        = showBadges,
+                                onRate            = { stars -> onRate(item.book, stars) }
                             )
                             is ShelfItem.SeriesBundle -> SeriesBundleCard(
                                 bundle   = item,
@@ -744,19 +762,47 @@ private fun BookCoverItem(
     onReadOffline: () -> Unit = {},
     onRemoveDownload: (syncFirst: Boolean) -> Unit = {},
     onSyncNotes: () -> Unit = {},
-    onMarkRead: (read: Boolean, finishedToday: Boolean) -> Unit = { _, _ -> }
+    onMarkRead: (read: Boolean, finishedToday: Boolean) -> Unit = { _, _ -> },
+    onMessage: (String) -> Unit = {},
+    showBadges: Boolean = true,
+    onRate: (stars: Int?) -> Unit = {}
 ) {
+    var showShelfDialog  by remember { mutableStateOf(false) }
+    if (showShelfDialog) {
+        com.ereader.app.ui.shelves.ShelfPickerDialog(
+            book      = book,
+            onDismiss = { showShelfDialog = false },
+            onMessage = onMessage
+        )
+    }
     var showContextMenu  by remember { mutableStateOf(false) }
     var showDeleteDialog by remember { mutableStateOf(false) }
     var showRemoveDownloadDialog by remember { mutableStateOf(false) }
     var showMarkReadDialog by remember { mutableStateOf(false) }
+    var showRatingDialog   by remember { mutableStateOf(false) }
+    var ratingAfterFinish  by remember { mutableStateOf(false) }
 
     // ── Mark as Read popup ("when did you finish it?") ────────────────────────
+    // Afterwards, ask for a rating — even if Calibre already has one, because that
+    // may have come with the book's downloaded metadata, not from the reader.
     if (showMarkReadDialog) {
         MarkAsReadDialog(
             book      = book,
             onDismiss = { showMarkReadDialog = false },
-            onConfirm = { today -> onMarkRead(true, today) }
+            onConfirm = { today ->
+                onMarkRead(true, today)
+                ratingAfterFinish = true; showRatingDialog = true
+            }
+        )
+    }
+
+    // ── Rate Book popup ───────────────────────────────────────────────────────
+    if (showRatingDialog) {
+        RatingDialog(
+            book         = book,
+            justFinished = ratingAfterFinish,
+            onDismiss    = { showRatingDialog = false; ratingAfterFinish = false },
+            onSave       = onRate
         )
     }
 
@@ -816,6 +862,11 @@ private fun BookCoverItem(
                 onClick     = { showContextMenu = false; onNotesClick() },
                 leadingIcon = { Icon(Icons.Default.Notes, contentDescription = null) }
             )
+            DropdownMenuItem(
+                text        = { Text("Add to Shelf\u2026") },
+                onClick     = { showContextMenu = false; showShelfDialog = true },
+                leadingIcon = { Icon(Icons.Default.CollectionsBookmark, contentDescription = null) }
+            )
             // "Mark as Read" (asks when) / "Mark as Unread" (instant)
             if (book.isRead) {
                 DropdownMenuItem(
@@ -830,6 +881,15 @@ private fun BookCoverItem(
                     leadingIcon = { Icon(Icons.Default.TaskAlt, contentDescription = null) }
                 )
             }
+            // "Rate Book" — 1 to 5 stars, synced with Calibre's Rating
+            DropdownMenuItem(
+                text        = {
+                    val s = wholeStars(book)
+                    Text(if (s != null) "Rate Book  ${starText(s)}" else "Rate Book")
+                },
+                onClick     = { showContextMenu = false; ratingAfterFinish = false; showRatingDialog = true },
+                leadingIcon = { Icon(Icons.Default.StarOutline, contentDescription = null) }
+            )
             // "Read Offline" — saves a Calibre/Drive book onto the phone.
             // Hidden for imported books (they already live on the phone),
             // for books already saved, and while a save is in progress.
@@ -991,22 +1051,33 @@ private fun BookCoverItem(
             }
         }
 
-        // ── Read tick / reading progress arc (top-left corner) ────────────
-        if (book.isRead) {
-            ReadBadge(
-                modifier = Modifier
+        // ── Cover badges (top-left corner, stacked top to bottom) ─────────
+        //   1. Read tick (or the reading-progress arc while reading)
+        //   2. NEW  — added to Calibre < 14 days ago and not read
+        //   3. Fire — rated 5 stars in Calibre
+        // Settings → "Show cover badges" hides 1-3; the progress arc always shows.
+        val showRead = showBadges && book.isRead
+        val showArc  = !book.isRead && book.readingProgress > 0f
+        val showNew  = showBadges && isNewBook(book)
+        val showFire = showBadges && isFiveStar(book)
+        if (showRead || showArc || showNew || showFire) {
+            Column(
+                modifier            = Modifier
                     .align(Alignment.TopStart)
                     .padding(5.dp),
-                size     = 18.dp
-            )
-        } else if (book.readingProgress > 0f) {
-            ReadingProgressArc(
-                progress = book.readingProgress,
-                modifier = Modifier
-                    .align(Alignment.TopStart)
-                    .padding(4.dp)
-                    .size(22.dp)
-            )
+                verticalArrangement = Arrangement.spacedBy(3.dp),
+                horizontalAlignment = Alignment.Start
+            ) {
+                if (showRead) ReadBadge(size = 18.dp)
+                if (showArc) {
+                    ReadingProgressArc(
+                        progress = book.readingProgress,
+                        modifier = Modifier.size(22.dp)
+                    )
+                }
+                if (showNew)  NewBadge(height = 18.dp)
+                if (showFire) FavoriteRatingBadge(size = 18.dp)
+            }
         }
     }
 }
@@ -1200,16 +1271,21 @@ private fun FullScreenLoading() {
 // LEGACY BookCard — kept for any future reference/reuse outside the shelf grid
 // ─────────────────────────────────────────────────────────────────────────────
 
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 fun BookCard(
     book: Book,
     onClick: () -> Unit,
     onFavoriteToggle: () -> Unit,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    /** Press-and-hold action (e.g. "Remove from shelf"); none if null. */
+    onLongClick: (() -> Unit)? = null
 ) {
     Card(
-        onClick   = onClick,
-        modifier  = modifier.fillMaxWidth(),
+        modifier  = modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(12.dp))
+            .combinedClickable(onClick = onClick, onLongClick = onLongClick),
         shape     = RoundedCornerShape(12.dp),
         elevation = CardDefaults.cardElevation(defaultElevation = 3.dp)
     ) {

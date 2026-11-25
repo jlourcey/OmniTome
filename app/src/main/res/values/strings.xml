@@ -1,6 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="app_name">OmniTome</string>
+    <string name="widget_description">Your current book and reading streak. Tap to keep reading.</string>
 
     <!-- Library screen -->
     <string name="library_title">OmniTome</string>

@@ -92,6 +92,13 @@ class SeriesDetailViewModel @Inject constructor(
         viewModelScope.launch { _message.value = setReadWithMessage(repository, book, read, finishedToday) }
     }
 
+    /** Long-press → "Rate Book" (stars = null clears the rating). */
+    fun onRate(book: Book, stars: Int?) {
+        viewModelScope.launch { _message.value = setRatingWithMessage(repository, book, stars) }
+    }
+
+    fun showMessage(message: String) { _message.value = message }
+
     fun onMessageDismissed() { _message.value = null }
 
     /**
@@ -190,7 +197,9 @@ fun SeriesDetailScreen(
                         onReadOffline = { viewModel.onReadOffline(book) },
                         onRemoveDownload = { syncFirst -> viewModel.onRemoveDownload(book, syncFirst) },
                         onSyncNotes   = { viewModel.onSyncNotes(book) },
-                        onMarkRead    = { read, today -> viewModel.onMarkRead(book, read, today) }
+                        onMarkRead    = { read, today -> viewModel.onMarkRead(book, read, today) },
+                        onMessage     = viewModel::showMessage,
+                        onRate        = { stars -> viewModel.onRate(book, stars) }
                     )
                     SeriesShelfBar()
                 }
@@ -225,17 +234,43 @@ private fun SeriesBookRow(
     onReadOffline: () -> Unit = {},
     onRemoveDownload: (syncFirst: Boolean) -> Unit = {},
     onSyncNotes: () -> Unit  = {},
-    onMarkRead: (read: Boolean, finishedToday: Boolean) -> Unit = { _, _ -> }
+    onMarkRead: (read: Boolean, finishedToday: Boolean) -> Unit = { _, _ -> },
+    onMessage: (String) -> Unit = {},
+    onRate: (stars: Int?) -> Unit = {}
 ) {
+    var showShelfDialog by remember { mutableStateOf(false) }
+    if (showShelfDialog) {
+        com.ereader.app.ui.shelves.ShelfPickerDialog(
+            book      = book,
+            onDismiss = { showShelfDialog = false },
+            onMessage = onMessage
+        )
+    }
     var showContextMenu by remember { mutableStateOf(false) }
     var showRemoveDownloadDialog by remember { mutableStateOf(false) }
     var showMarkReadDialog by remember { mutableStateOf(false) }
+    var showRatingDialog   by remember { mutableStateOf(false) }
+    var ratingAfterFinish  by remember { mutableStateOf(false) }
+
+    if (showRatingDialog) {
+        RatingDialog(
+            book         = book,
+            justFinished = ratingAfterFinish,
+            onDismiss    = { showRatingDialog = false; ratingAfterFinish = false },
+            onSave       = onRate
+        )
+    }
 
     if (showMarkReadDialog) {
         MarkAsReadDialog(
             book      = book,
             onDismiss = { showMarkReadDialog = false },
-            onConfirm = { today -> onMarkRead(true, today) }
+            onConfirm = { today ->
+                onMarkRead(true, today)
+                // Ask for a rating straight after — even if it already has one (that may
+                // have come with the book's metadata, not from the reader).
+                ratingAfterFinish = true; showRatingDialog = true
+            }
         )
     }
 
@@ -267,6 +302,11 @@ private fun SeriesBookRow(
             onClick     = { showContextMenu = false; onNotesClick() },
             leadingIcon = { Icon(Icons.Default.Notes, contentDescription = null) }
         )
+        DropdownMenuItem(
+            text        = { Text("Add to Shelf\u2026") },
+            onClick     = { showContextMenu = false; showShelfDialog = true },
+            leadingIcon = { Icon(Icons.Default.CollectionsBookmark, contentDescription = null) }
+        )
         if (book.isRead) {
             DropdownMenuItem(
                 text        = { Text("Mark as Unread") },
@@ -280,6 +320,14 @@ private fun SeriesBookRow(
                 leadingIcon = { Icon(Icons.Default.TaskAlt, contentDescription = null) }
             )
         }
+        DropdownMenuItem(
+            text        = {
+                val st = wholeStars(book)
+                Text(if (st != null) "Rate Book  ${starText(st)}" else "Rate Book")
+            },
+            onClick     = { showContextMenu = false; ratingAfterFinish = false; showRatingDialog = true },
+            leadingIcon = { Icon(Icons.Default.StarOutline, contentDescription = null) }
+        )
         if (book.source != BookSource.LOCAL && !book.isDownloaded && !isDownloading) {
             DropdownMenuItem(
                 text        = { Text("Read Offline") },

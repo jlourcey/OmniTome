@@ -15,6 +15,17 @@ import android.webkit.WebView
 import android.widget.Toast
 import androidx.activity.viewModels
 import androidx.appcompat.app.AppCompatActivity
+import androidx.core.view.WindowCompat
+import androidx.core.view.WindowInsetsCompat
+import androidx.core.view.WindowInsetsControllerCompat
+import androidx.compose.foundation.background
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.padding
+import androidx.compose.ui.unit.dp
+import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.getValue
 import androidx.compose.ui.platform.ComposeView
 import androidx.compose.ui.platform.ViewCompositionStrategy
 import androidx.lifecycle.Lifecycle
@@ -26,6 +37,7 @@ import com.ereader.app.ui.theme.EReaderTheme
 import dagger.hilt.android.AndroidEntryPoint
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.asSharedFlow
+import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.launch
 import org.json.JSONArray
 import org.json.JSONObject
@@ -34,6 +46,7 @@ import org.readium.r2.navigator.epub.EpubNavigatorFactory
 import org.readium.r2.navigator.epub.EpubNavigatorFragment
 import org.readium.r2.navigator.epub.EpubPreferences
 import org.readium.r2.shared.publication.Locator
+import org.readium.r2.shared.publication.services.locateProgression
 import timber.log.Timber
 import java.util.Locale
 
@@ -70,13 +83,25 @@ class ReaderActivity : AppCompatActivity() {
     companion object {
         const val EXTRA_BOOK_ID    = "extra_book_id"
         const val EXTRA_BOOK_TITLE = "extra_book_title"
+        /** Open at this chapter (EPUB href) instead of the saved position. */
+        const val EXTRA_GOTO_HREF        = "extra_goto_href"
+        /** How far into that chapter, 0–1. */
+        const val EXTRA_GOTO_PROGRESSION = "extra_goto_progression"
+        /** Words to highlight once the page is showing (from Search inside books). */
+        const val EXTRA_HIGHLIGHT_WORDS  = "extra_highlight_words"
 
+        private const val MENU_DEFINE    = 1000
         private const val MENU_HIGHLIGHT = 1001
         private const val MENU_ADD_NOTE  = 1002
     }
 
     private val viewModel: ReaderViewModel by viewModels()
     private var navigatorFragment: EpubNavigatorFragment? = null
+    /** Set instead of [navigatorFragment] when the book is a PDF (see PdfReader.kt). */
+    private var pdfView: ComposeView? = null
+
+    /** The page view of whichever reader is showing (EPUB or PDF). */
+    private fun readerView(): View? = navigatorFragment?.view ?: pdfView
 
     // Most-recently-seen locator — updated from the fragment's currentLocator Flow.
     private var lastKnownLocator: Locator? = null
@@ -151,8 +176,10 @@ class ReaderActivity : AppCompatActivity() {
                 }
 
                 val msSinceLastGesture = System.currentTimeMillis() - lastGestureTimeMs
-                if (dx < slopPx && dy < slopPx && dt < longPressMs
-                        && msSinceLastGesture > 1500L) {
+                // A tap on the controls themselves (top/bottom bar, read-aloud
+                // player) is handled by those controls — don't also show/hide them.
+                if (pdfView == null && dx < slopPx && dy < slopPx && dt < longPressMs
+                        && msSinceLastGesture > 1500L && !viewModel.isOnControl(event.x, event.y)) {
                     viewModel.toggleHud()
                 }
             }
@@ -174,6 +201,9 @@ class ReaderActivity : AppCompatActivity() {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_reader)
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        // Full-screen reading: the page fills the whole screen (behind where the
+        // status bar and navigation bar normally sit) and those bars are hidden.
+        enterFullScreen()
         // Apply reader theme to window immediately — colours the status bar,
         // nav bar, and window background before the book finishes loading.
         // On API ≤ 34 this sets the opaque status-bar colour directly.
@@ -187,7 +217,12 @@ class ReaderActivity : AppCompatActivity() {
             return
         }
 
-        viewModel.loadBook(bookId)
+        pendingHighlightWords = intent.getStringArrayListExtra(EXTRA_HIGHLIGHT_WORDS)?.filter { it.isNotBlank() }
+        viewModel.loadBook(
+            bookId,
+            gotoHref        = intent.getStringExtra(EXTRA_GOTO_HREF),
+            gotoProgression = intent.getDoubleExtra(EXTRA_GOTO_PROGRESSION, -1.0).takeIf { it >= 0 }
+        )
         initTts()
 
         lifecycleScope.launch {
@@ -195,7 +230,13 @@ class ReaderActivity : AppCompatActivity() {
                 viewModel.readerState.collect { state ->
                     when (state) {
                         is ReaderState.Loading -> showLoading()
-                        is ReaderState.Ready   -> launchNavigator(state)
+                        is ReaderState.Ready   -> { hideStatus(); launchNavigator(state) }
+                        is ReaderState.PdfReady -> { hideStatus(); launchPdfReader(state) }
+                        is ReaderState.Converting -> showStatus(
+                            "Converting \u201C${state.title}\u201D to EPUB in Calibre\u2026",
+                            "This only happens the first time. Calibre keeps the EPUB too.",
+                            state.progress
+                        )
                         is ReaderState.Error   -> showError(state.message)
                     }
                 }
@@ -211,6 +252,102 @@ class ReaderActivity : AppCompatActivity() {
                 }
             }
         }
+    }
+
+    // ── Full-screen reading ───────────────────────────────────────────────────
+    //
+    // While you read, the status bar (clock, battery) and the navigation bar are
+    // hidden so the page fills the whole screen in the reading theme's colour.
+    // Swiping in from the top or bottom edge shows them briefly. Opening the
+    // reader controls (tap the middle of the page) shows them until the controls
+    // close again.
+
+    private val systemBars by lazy {
+        WindowInsetsControllerCompat(window, window.decorView).apply {
+            // Bars slide in on an edge swipe and hide again by themselves.
+            systemBarsBehavior = WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+        }
+    }
+
+    private fun enterFullScreen() {
+        // Draw the page under the system-bar areas instead of leaving bands for them.
+        WindowCompat.setDecorFitsSystemWindows(window, false)
+        // Use the strip beside the camera cutout too (otherwise Android leaves a
+        // black band there). Readium pads the text below the cutout itself, and
+        // that padding is painted in the theme colour by paintReaderContainers().
+        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.P) {
+            window.attributes = window.attributes.apply {
+                layoutInDisplayCutoutMode =
+                    WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES
+            }
+        }
+        hideSystemBars()
+    }
+
+    private fun hideSystemBars() = systemBars.hide(WindowInsetsCompat.Type.systemBars())
+    private fun showSystemBars() = systemBars.show(WindowInsetsCompat.Type.systemBars())
+
+    // ── Volume-key page turns (Settings, off by default) ───────────────────────
+
+    private fun volumeKeysTurnPages(): Boolean =
+        viewModel.volumeKeyPageTurns.value && viewModel.ttsState.value != TtsState.PLAYING
+
+    override fun onKeyDown(keyCode: Int, event: android.view.KeyEvent): Boolean {
+        val forward = when (keyCode) {
+            android.view.KeyEvent.KEYCODE_VOLUME_DOWN -> true
+            android.view.KeyEvent.KEYCODE_VOLUME_UP   -> false
+            else -> return super.onKeyDown(keyCode, event)
+        }
+        if (!volumeKeysTurnPages()) return super.onKeyDown(keyCode, event)
+        if (pdfView != null) {
+            viewModel.turnPdfPage(if (forward) 1 else -1)
+        } else {
+            val nav = navigatorFragment ?: return true
+            lifecycleScope.launch { if (forward) nav.goForward() else nav.goBackward() }
+        }
+        return true   // handled: no volume change
+    }
+
+    override fun onKeyUp(keyCode: Int, event: android.view.KeyEvent): Boolean {
+        if ((keyCode == android.view.KeyEvent.KEYCODE_VOLUME_DOWN || keyCode == android.view.KeyEvent.KEYCODE_VOLUME_UP)
+            && volumeKeysTurnPages()) return true
+        return super.onKeyUp(keyCode, event)
+    }
+
+    /** Android shows the bars again after dialogs, the share sheet, etc. — hide them on return. */
+    override fun onWindowFocusChanged(hasFocus: Boolean) {
+        super.onWindowFocusChanged(hasFocus)
+        if (hasFocus && !viewModel.hudVisible.value) hideSystemBars()
+    }
+
+    /** The reading theme's background colour. */
+    private fun themeColorInt(): Int = android.graphics.Color.parseColor(
+        when (viewModel.readerThemePref.value) {
+            ReaderTheme.DAY   -> "#ffffff"
+            ReaderTheme.NIGHT -> "#1a1a1a"
+            ReaderTheme.SEPIA -> "#f4ecd8"
+            ReaderTheme.PAPER -> "#f0ebe0"
+        }
+    )
+
+    /**
+     * Paints every layout inside Readium's page views (not the WebViews, which
+     * are styled separately) in the reading theme's colour. Readium adds padding
+     * above and below each page for the camera cutout and page margins; without
+     * this, that padding showed as white bands on Paper, Sepia and Night.
+     * Cheap and safe to call often — only views with a different colour are touched.
+     */
+    private fun paintReaderContainers() {
+        val root  = readerView() ?: return
+        val color = try { themeColorInt() } catch (_: Exception) { return }
+        fun paint(v: View) {
+            if (v is WebView) return
+            if ((v.background as? android.graphics.drawable.ColorDrawable)?.color != color) {
+                v.setBackgroundColor(color)
+            }
+            if (v is ViewGroup) repeat(v.childCount) { paint(v.getChildAt(it)) }
+        }
+        paint(root)
     }
 
     override fun onDestroy() {
@@ -266,6 +403,7 @@ class ReaderActivity : AppCompatActivity() {
                 mode: android.view.ActionMode,
                 menu: Menu
             ): Boolean {
+                menu.add(Menu.NONE, MENU_DEFINE,    99,  "Define")
                 menu.add(Menu.NONE, MENU_HIGHLIGHT, 100, "Highlight")
                 menu.add(Menu.NONE, MENU_ADD_NOTE,  101, "Add Note")
                 return true
@@ -281,6 +419,20 @@ class ReaderActivity : AppCompatActivity() {
                 item: MenuItem
             ): Boolean {
                 return when (item.itemId) {
+                    MENU_DEFINE -> {
+                        // Offline dictionary card — the book stays open underneath.
+                        lifecycleScope.launch {
+                            val text = (navigatorFragment as? SelectableNavigator)
+                                ?.currentSelection()?.locator?.text?.highlight.orEmpty()
+                            viewModel.lookUpWord(text)
+                        }
+                        mode.finish()
+                        primaryWebView()?.evaluateJavascript(
+                            "if(window.getSelection)window.getSelection().removeAllRanges();", null
+                        )
+                        lastGestureTimeMs = System.currentTimeMillis()
+                        true
+                    }
                     MENU_HIGHLIGHT, MENU_ADD_NOTE -> {
                         lifecycleScope.launch {
                             val selectionLocator = (navigatorFragment as? SelectableNavigator)
@@ -335,6 +487,11 @@ class ReaderActivity : AppCompatActivity() {
             .replace(R.id.reader_container, fragment, "epub_navigator")
             .commitAllowingStateLoss()
 
+        // Readium builds the next/previous chapter's page view ahead of time; colour
+        // its margins as soon as it's laid out so a swipe never flashes white.
+        findViewById<android.widget.FrameLayout>(R.id.reader_container)
+            .viewTreeObserver.addOnGlobalLayoutListener { paintReaderContainers() }
+
         // Track locator changes: update ViewModel progress, cache for annotations,
         // re-inject CSS/JS, re-apply highlight decorations, and fire page-curl events.
         lifecycleScope.launch {
@@ -346,6 +503,15 @@ class ReaderActivity : AppCompatActivity() {
                     // Re-inject after every page/chapter change. Both CSS and JS
                     // are idempotent so calling this repeatedly is harmless.
                     injectCssAndJs(fragment)
+                    // New chapters create new page views — colour their margins too.
+                    paintReaderContainers()
+                    // Page X of Y + time left (after the page has settled).
+                    measureLayoutSoon(locator, 300)
+                    // Opened from "Search inside books": mark the words on this chapter.
+                    pendingHighlightWords?.let { words ->
+                        pendingHighlightWords = null
+                        highlightSearchWords(locator, words)
+                    }
 
                     // Re-apply highlights on every page/chapter load.
                     // JS mark injection is used exclusively — Readium's applyDecorations
@@ -405,11 +571,145 @@ class ReaderActivity : AppCompatActivity() {
                 .collect {
                     applyActivityTheme()
                     applyReaderPreferences()
+                    // New font/size → new page count. Re-measure once it has re-flowed.
+                    lastKnownLocator?.let { measureLayoutSoon(it, 900) }
                 }
             }
         }
 
         attachHud()
+        attachTtsPlayer(findViewById(R.id.reader_container))
+    }
+
+    // ── Search inside books: highlight the words ─────────────────────────────
+
+    private var pendingHighlightWords: List<String>? = null
+
+    /** Marks every occurrence of [words] in the chapter on screen (yellow, like a highlighter). */
+    private fun highlightSearchWords(locator: Locator, words: List<String>) {
+        lifecycleScope.launch {
+            kotlinx.coroutines.delay(600)   // let the chapter finish laying out
+            val root = navigatorFragment?.view ?: return@launch
+            val href = android.net.Uri.decode(locator.href.toString().substringBefore('#'))
+            // Letters, digits and apostrophes only — safe to put straight into a regex.
+            val safe = words.map { w -> w.filter { it.isLetterOrDigit() || it == '\'' } }.filter { it.isNotEmpty() }
+            if (safe.isEmpty()) return@launch
+            val list = JSONArray(safe.map { it.lowercase() }).toString()
+            val js = """
+                (function(){
+                  if (!location.href || decodeURIComponent(location.href).indexOf(${JSONObject.quote(href)}) < 0) return;
+                  var words = $list;
+                  var re = new RegExp('(' + words.join('|') + ')', 'gi');
+                  var walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT, null);
+                  var nodes = []; while (walker.nextNode()) nodes.push(walker.currentNode);
+                  nodes.forEach(function(n){
+                    if (!re.test(n.nodeValue) || (n.parentNode && n.parentNode.className === 'omni-search')) return;
+                    re.lastIndex = 0;
+                    var span = document.createElement('span');
+                    span.innerHTML = n.nodeValue.replace(/&/g,'&amp;').replace(/</g,'&lt;')
+                      .replace(re, '<mark class="omni-search" style="background:rgba(255,213,79,.75);color:inherit">${'$'}1</mark>');
+                    n.parentNode.replaceChild(span, n);
+                  });
+                })();
+            """.trimIndent()
+            forEachWebView(root) { it.evaluateJavascript(js, null) }
+        }
+    }
+
+    // ── Page numbers + time left ──────────────────────────────────────────────
+
+    private var measureJob: kotlinx.coroutines.Job? = null
+
+    /**
+     * Asks the page on screen how many screens its chapter takes and which one
+     * is showing (Readium lays chapters out as side-by-side screen-wide columns).
+     * Readium keeps neighbouring chapters loaded too, so only the page view whose
+     * address matches the current chapter is used.
+     */
+    private fun measureLayoutSoon(locator: Locator, delayMs: Long) {
+        measureJob?.cancel()
+        measureJob = lifecycleScope.launch {
+            kotlinx.coroutines.delay(delayMs)
+            val root = navigatorFragment?.view ?: return@launch
+            val href = locator.href.toString().substringBefore('#')
+            val js = "(function(){var w=window.innerWidth||1;" +
+                "var se=document.scrollingElement||document.documentElement;" +
+                "var pages=Math.max(1,Math.round(se.scrollWidth/w));" +
+                "var cur=Math.min(pages,Math.round((window.scrollX||se.scrollLeft||0)/w)+1);" +
+                "return JSON.stringify({u:location.href,p:pages,c:cur});})()"
+            forEachWebView(root) { wv ->
+                wv.evaluateJavascript(js) { raw ->
+                    runCatching {
+                        val json = JSONObject(org.json.JSONTokener(raw).nextValue() as String)
+                        val url  = android.net.Uri.decode(json.getString("u")).substringBefore('#')
+                        if (url.endsWith(android.net.Uri.decode(href))) {
+                            viewModel.onLayoutMeasured(href, json.getInt("c"), json.getInt("p"),
+                                resources.displayMetrics.widthPixels)
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // ── PDF reader ────────────────────────────────────────────────────────────
+
+    /**
+     * Shows a PDF in OmniTome's own viewer (PdfReader.kt, Android's PdfRenderer).
+     * Shares full-screen mode, the reading theme and progress saving with EPUB.
+     * PDF pages are pictures, so text highlights, "Define", font settings and
+     * read-aloud don't apply to them.
+     */
+    private fun launchPdfReader(state: ReaderState.PdfReady) {
+        if (pdfView != null) return
+        val container = findViewById<android.widget.FrameLayout>(R.id.reader_container)
+        val view = ComposeView(this).apply {
+            setViewCompositionStrategy(ViewCompositionStrategy.DisposeOnViewTreeLifecycleDestroyed)
+            setContent {
+                EReaderTheme {
+                    val theme by viewModel.readerThemePref.collectAsState()
+                    val bars  by viewModel.hudVisible.collectAsState()
+                    PdfReader(
+                        file          = state.file,
+                        title         = state.title,
+                        initialPage   = state.initialPage,
+                        theme         = theme,
+                        barsVisible   = bars,
+                        onToggleBars  = { viewModel.toggleHud() },
+                        onPageChanged = { page, count -> viewModel.onPdfPageChanged(page, count) },
+                        pageTurns     = viewModel.pdfPageTurns,
+                        onClose       = { finish() }
+                    )
+                    // ── Just finished the book → rating popup ─────────────────
+                    val finishedBook by viewModel.finishedBook.collectAsState()
+                    finishedBook?.let { book ->
+                        com.ereader.app.ui.bookshelf.RatingDialog(
+                            book         = book,
+                            justFinished = true,
+                            onDismiss    = viewModel::dismissFinishedRating,
+                            onSave       = { stars -> viewModel.rateFinishedBook(book, stars) }
+                        )
+                    }
+                }
+            }
+        }
+        container.addView(view, android.widget.FrameLayout.LayoutParams(
+            android.widget.FrameLayout.LayoutParams.MATCH_PARENT,
+            android.widget.FrameLayout.LayoutParams.MATCH_PARENT
+        ))
+        pdfView = view
+        applyActivityTheme()
+        // Status/navigation bars appear with the PDF's top and bottom bars.
+        lifecycleScope.launch {
+            repeatOnLifecycle(Lifecycle.State.STARTED) {
+                viewModel.hudVisible.collect { if (it) showSystemBars() else hideSystemBars() }
+            }
+        }
+        lifecycleScope.launch {
+            repeatOnLifecycle(Lifecycle.State.STARTED) {
+                viewModel.readerThemePref.collect { applyActivityTheme() }
+            }
+        }
     }
 
     // ── Text-to-speech engine ─────────────────────────────────────────────────
@@ -448,6 +748,7 @@ class ReaderActivity : AppCompatActivity() {
                                 // Snapshot progression before advancing so we can detect
                                 // whether the navigator actually moved (end-of-book guard).
                                 val progressBefore = lastKnownLocator?.locations?.totalProgression
+                                val hrefBefore     = lastKnownLocator?.href?.toString()
 
                                 val advanced = try {
                                     frag.goForward()
@@ -466,6 +767,11 @@ class ReaderActivity : AppCompatActivity() {
                                 if (progressAfter == null || progressAfter == progressBefore) {
                                     // Navigator didn't move — we're at the end of the book.
                                     viewModel.onTtsStopped()
+                                } else if (viewModel.sleepTimer.value == SleepTimer.EndOfChapter &&
+                                           lastKnownLocator?.href?.toString() != hrefBefore) {
+                                    // Sleep timer "End of chapter": the chapter just ended.
+                                    viewModel.setSleepTimer(SleepTimer.Off)
+                                    pauseReading()
                                 } else if (viewModel.ttsState.value == TtsState.PLAYING) {
                                     // Still playing — extract text from the new page and continue.
                                     startReading()
@@ -500,7 +806,8 @@ class ReaderActivity : AppCompatActivity() {
             Toast.makeText(this, "Text-to-speech is not available on this device", Toast.LENGTH_SHORT).show()
             return
         }
-        val webView = primaryWebView() ?: return
+        val webView = currentWebView() ?: return
+        tts?.setSpeechRate(viewModel.ttsRate.value)
         val visibleTextJs = """
             (function() {
                 var vw = window.innerWidth;
@@ -556,6 +863,19 @@ class ReaderActivity : AppCompatActivity() {
     }
 
     /** Stops reading and clears all buffered chunks. */
+    /**
+     * The position slider: jumps to [fraction] (0.0–1.0) of the way through the book.
+     * Reaching the last pages this way counts as finishing it, like turning there.
+     */
+    private fun seekTo(fraction: Float) {
+        val state = viewModel.readerState.value as? ReaderState.Ready ?: return
+        lifecycleScope.launch {
+            val target = state.publication.locateProgression(fraction.toDouble().coerceIn(0.0, 1.0))
+                ?: return@launch
+            navigatorFragment?.go(target)
+        }
+    }
+
     fun stopReading() {
         tts?.stop()
         ttsChunks.clear()
@@ -609,6 +929,21 @@ class ReaderActivity : AppCompatActivity() {
     }
 
     /** Returns the first [WebView] found inside the navigator fragment's view tree. */
+    /**
+     * The page view showing the current chapter. Readium keeps neighbouring
+     * chapters loaded too; this picks the one whose address matches where you are.
+     */
+    private fun currentWebView(): WebView? {
+        val root = navigatorFragment?.view ?: return null
+        val href = lastKnownLocator?.href?.toString()?.substringBefore('#')?.let { android.net.Uri.decode(it) }
+            ?: return primaryWebView()
+        var found: WebView? = null
+        forEachWebView(root) { wv ->
+            if (found == null && wv.url?.let { android.net.Uri.decode(it).substringBefore('#').endsWith(href) } == true) found = wv
+        }
+        return found ?: primaryWebView()
+    }
+
     private fun primaryWebView(): WebView? {
         val root = navigatorFragment?.view ?: return null
         var found: WebView? = null
@@ -713,11 +1048,17 @@ class ReaderActivity : AppCompatActivity() {
             ReaderFontFamily.SERIF  -> "Georgia, 'Times New Roman', serif"
             ReaderFontFamily.SANS   -> "'Helvetica Neue', Arial, sans-serif"
             ReaderFontFamily.MONO   -> "'Courier New', Courier, monospace"
+            ReaderFontFamily.DYSLEXIC -> "'OpenDyslexic', 'Helvetica Neue', Arial, sans-serif"
         }
+        // OpenDyslexic ships inside Readium and is served to the page at this address.
+        val fontFace = if (family == ReaderFontFamily.DYSLEXIC)
+            "@font-face { font-family: 'OpenDyslexic'; " +
+            "src: url('https://readium/assets/readium/fonts/OpenDyslexic-Regular.otf') format('opentype'); }\n"
+        else ""
 
         // Build the CSS as a plain string, then base64-encode it so special
         // characters (quotes, apostrophes, newlines) can't break the JS template.
-        val css = """
+        val css = fontFace + """
             html, body {
                 font-size:        ${sp}px    !important;
                 font-family:      $fontCss   !important;
@@ -851,6 +1192,8 @@ class ReaderActivity : AppCompatActivity() {
                     }
             }
         } catch (_: Exception) {}
+        // Readium's page margins (above/below the text) — same colour.
+        paintReaderContainers()
     }
 
     /**
@@ -992,6 +1335,63 @@ class ReaderActivity : AppCompatActivity() {
 
     // ── Compose HUD ───────────────────────────────────────────────────────────
 
+    private var playerView: ComposeView? = null
+
+    /**
+     * The read-aloud player bar: a small view pinned to the bottom of the page,
+     * only showing while reading aloud. It's kept above the page view.
+     */
+    private fun attachTtsPlayer(container: android.widget.FrameLayout) {
+        val view = ComposeView(this).apply {
+            setViewCompositionStrategy(ViewCompositionStrategy.DisposeOnViewTreeLifecycleDestroyed)
+            setContent {
+                EReaderTheme {
+                    val theme by viewModel.readerThemePref.collectAsState()
+                    val state by viewModel.ttsState.collectAsState()
+                    val rate  by viewModel.ttsRate.collectAsState()
+                    val sleep by viewModel.sleepTimer.collectAsState()
+                    androidx.compose.foundation.layout.Box(
+                        androidx.compose.ui.Modifier.controlArea(viewModel, "tts_player")
+                    ) { TtsPlayerBar(
+                        theme = theme, state = state, rate = rate, sleep = sleep,
+                        onPause  = { pauseReading() },
+                        onResume = { resumeReading() },
+                        onStop   = { viewModel.setSleepTimer(SleepTimer.Off); stopReading() },
+                        onRate   = { r -> viewModel.setTtsRate(r) },
+                        onSleep  = { s -> viewModel.setSleepTimer(s) }
+                    ) }
+                }
+            }
+        }
+        container.addView(view, android.widget.FrameLayout.LayoutParams(
+            android.widget.FrameLayout.LayoutParams.MATCH_PARENT,
+            android.widget.FrameLayout.LayoutParams.WRAP_CONTENT,
+            android.view.Gravity.BOTTOM
+        ))
+        playerView = view
+
+        // Speed changes apply from the next sentence.
+        lifecycleScope.launch {
+            repeatOnLifecycle(Lifecycle.State.STARTED) {
+                viewModel.ttsRate.collect { tts?.setSpeechRate(it) }
+            }
+        }
+        // Timed sleep: pause when the time is up.
+        lifecycleScope.launch {
+            viewModel.sleepTimer.collectLatest { timer ->
+                if (timer is SleepTimer.At) {
+                    kotlinx.coroutines.delay((timer.endsAt - System.currentTimeMillis()).coerceAtLeast(0))
+                    viewModel.setSleepTimer(SleepTimer.Off)
+                    if (viewModel.ttsState.value == TtsState.PLAYING) pauseReading()
+                }
+            }
+        }
+        // Stopping read-aloud clears the sleep timer.
+        lifecycleScope.launch {
+            viewModel.ttsState.collect { if (it == TtsState.IDLE) viewModel.setSleepTimer(SleepTimer.Off) }
+        }
+    }
+
     private fun attachHud() {
         val container = findViewById<android.widget.FrameLayout>(R.id.reader_container)
         val hudView = ComposeView(this).apply {
@@ -1014,8 +1414,19 @@ class ReaderActivity : AppCompatActivity() {
                         onPauseReading       = { pauseReading() },
                         onResumeReading      = { resumeReading() },
                         onStopReading        = { stopReading() },
-                        onClose              = { stopReading(); finish() }
+                        onClose              = { stopReading(); finish() },
+                        onSeekTo             = { fraction -> seekTo(fraction) }
                     )
+                    // ── Just finished the book → rating popup ─────────────────
+                    val finishedBook by viewModel.finishedBook.collectAsState()
+                    finishedBook?.let { book ->
+                        com.ereader.app.ui.bookshelf.RatingDialog(
+                            book         = book,
+                            justFinished = true,
+                            onDismiss    = viewModel::dismissFinishedRating,
+                            onSave       = { stars -> viewModel.rateFinishedBook(book, stars) }
+                        )
+                    }
                 }
             }
         }
@@ -1043,10 +1454,12 @@ class ReaderActivity : AppCompatActivity() {
         lifecycleScope.launch {
             repeatOnLifecycle(Lifecycle.State.STARTED) {
                 viewModel.hudVisible.collect { visible ->
+                    // Status/navigation bars show with the reader controls, hide with them.
+                    if (visible) showSystemBars() else hideSystemBars()
                     if (visible) {
                         hudView.bringToFront()
                     } else {
-                        navigatorFragment?.view?.let { fragView ->
+                        readerView()?.let { fragView ->
                             // Make the fragment root transparent so that, in the
                             // status-bar and nav-bar zones that Readium doesn't
                             // cover with a WebView, the ComposeView's reader-theme
@@ -1054,6 +1467,8 @@ class ReaderActivity : AppCompatActivity() {
                             // through on API 35+ (forced edge-to-edge).
                             fragView.setBackgroundColor(android.graphics.Color.TRANSPARENT)
                             fragView.bringToFront()
+                            playerView?.bringToFront()
+                            paintReaderContainers()
                         }
                     }
                 }
@@ -1095,7 +1510,8 @@ class ReaderActivity : AppCompatActivity() {
                         // Return WebView to top only if the HUD hasn't been opened
                         // by the user during the animation window.
                         if (!viewModel.hudVisible.value) {
-                            navigatorFragment?.view?.bringToFront()
+                            readerView()?.bringToFront()
+                            playerView?.bringToFront()
                         }
                     }
                 }
@@ -1106,6 +1522,57 @@ class ReaderActivity : AppCompatActivity() {
     // ── Loading / error states ────────────────────────────────────────────────
 
     private fun showLoading() { Timber.d("ReaderActivity: loading…") }
+
+    // ── Status screen (e.g. "Converting to EPUB in Calibre…") ─────────────────
+
+    private var statusView: ComposeView? = null
+    private val statusText = androidx.compose.runtime.mutableStateOf(Triple("", "", 0f))
+
+    private fun showStatus(title: String, detail: String, progress: Float) {
+        statusText.value = Triple(title, detail, progress)
+        if (statusView != null) return
+        val view = ComposeView(this).apply {
+            setViewCompositionStrategy(ViewCompositionStrategy.DisposeOnViewTreeLifecycleDestroyed)
+            setContent {
+                EReaderTheme {
+                    val (t, d, p) = statusText.value
+                    val theme by viewModel.readerThemePref.collectAsState()
+                    androidx.compose.foundation.layout.Box(
+                        androidx.compose.ui.Modifier.fillMaxSize()
+                            .then(androidx.compose.ui.Modifier.background(readerHudSurface(theme).copy(alpha = 1f))),
+                        contentAlignment = androidx.compose.ui.Alignment.Center
+                    ) {
+                        androidx.compose.foundation.layout.Column(
+                            androidx.compose.ui.Modifier.padding(32.dp),
+                            horizontalAlignment = androidx.compose.ui.Alignment.CenterHorizontally
+                        ) {
+                            androidx.compose.material3.Text(t, color = readerHudOnSurface(theme),
+                                style = androidx.compose.material3.MaterialTheme.typography.titleMedium,
+                                textAlign = androidx.compose.ui.text.style.TextAlign.Center)
+                            androidx.compose.foundation.layout.Spacer(androidx.compose.ui.Modifier.height(16.dp))
+                            androidx.compose.material3.LinearProgressIndicator(
+                                progress = { p.coerceAtLeast(0.02f) },
+                                modifier = androidx.compose.ui.Modifier.fillMaxWidth(0.7f)
+                            )
+                            androidx.compose.foundation.layout.Spacer(androidx.compose.ui.Modifier.height(12.dp))
+                            androidx.compose.material3.Text(d, color = readerHudOnSurface(theme),
+                                style = androidx.compose.material3.MaterialTheme.typography.bodySmall,
+                                textAlign = androidx.compose.ui.text.style.TextAlign.Center)
+                        }
+                    }
+                }
+            }
+        }
+        findViewById<android.widget.FrameLayout>(R.id.reader_container).addView(view,
+            android.widget.FrameLayout.LayoutParams(android.widget.FrameLayout.LayoutParams.MATCH_PARENT,
+                android.widget.FrameLayout.LayoutParams.MATCH_PARENT))
+        statusView = view
+    }
+
+    private fun hideStatus() {
+        statusView?.let { (it.parent as? ViewGroup)?.removeView(it) }
+        statusView = null
+    }
 
     private fun showError(message: String) {
         android.widget.Toast.makeText(

@@ -48,7 +48,9 @@ object ReadiumModule {
         context      = context,
         httpClient   = httpClient,
         assetRetriever = assetRetriever,
-        pdfFactory   = null   // no PDF rendering engine bundled; pass null to disable PDF support
+        // PDFs don't go through Readium: they open in OmniTome's own PDF viewer
+        // (ui/reader/PdfReader.kt), built on Android's PdfRenderer.
+        pdfFactory   = null
     )
 
     @Provides

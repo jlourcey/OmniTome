@@ -165,16 +165,19 @@ class CalibreSyncService @Inject constructor(
 
     // ── Read status ───────────────────────────────────────────────────────────
 
-    /**
-     * Finds this library's "Read" and "Date Read" columns by looking at one of
-     * its books. Returns [CalibreReadColumns.NONE] if the library has neither.
-     * Throws if Calibre can't be reached.
-     */
-    suspend fun fetchReadColumns(calibreBookId: Int, libraryId: String?): CalibreReadColumns {
-        val base = baseUrl()
-        val lib  = libraryId
+    /** The library to use: the book's own, else the selected/default one. */
+    private suspend fun libFor(libraryId: String?): String =
+        libraryId
             ?: userPreferences.effectiveCalibreLibraryId.firstOrNull()
             ?: fetchLibraryInfo().defaultId
+
+    /**
+     * One book's full metadata from Calibre (GET /ajax/book/{id}/{library}),
+     * including "user_metadata" (custom columns). Throws if Calibre can't be reached.
+     */
+    suspend fun fetchBookJson(calibreBookId: Int, libraryId: String?): JSONObject {
+        val base = baseUrl()
+        val lib  = libFor(libraryId)
         val url = base.newBuilder()
             .addPathSegments("ajax/book")
             .addPathSegment(calibreBookId.toString())
@@ -184,16 +187,29 @@ class CalibreSyncService @Inject constructor(
         return withContext(Dispatchers.IO) {
             okHttpClient.newCall(Request.Builder().url(url).build()).execute().use { resp ->
                 if (!resp.isSuccessful) throw IOException("Calibre returned HTTP ${resp.code} when looking up the book")
-                val json = JSONObject(resp.body?.string().orEmpty())
-                CalibreReadColumns.detect(json.optJSONObject("user_metadata"))
+                JSONObject(resp.body?.string().orEmpty())
             }
         }
+    }
+
+    /**
+     * Finds this library's "Read", "Date Read", "Times Read" and "Shelves"
+     * columns by looking at one of its books, using the picks from
+     * Settings → Read Tracking. Returns [CalibreReadColumns.NONE] if it has none.
+     * Throws if Calibre can't be reached.
+     */
+    suspend fun fetchReadColumns(calibreBookId: Int, libraryId: String?): CalibreReadColumns {
+        val lib    = libFor(libraryId)
+        val json   = fetchBookJson(calibreBookId, lib)
+        val choice = userPreferences.getReadColumnChoice(lib)
+        return CalibreReadColumns.detect(json.optJSONObject("user_metadata"), choice)
     }
 
     /**
      * Sets one book's Read status in Calibre.
      * Marking read also fills in the Date Read column (if the library has one)
      * when [readAt] is known; marking unread clears it.
+     * [timesRead] = the new Times Read count to store (null = leave it alone).
      * Throws on any failure so the caller can keep the change for next time.
      */
     suspend fun pushReadStatus(
@@ -201,7 +217,8 @@ class CalibreSyncService @Inject constructor(
         libraryId: String?,
         columns: CalibreReadColumns,
         isRead: Boolean,
-        readAt: Long?
+        readAt: Long?,
+        timesRead: Int? = null
     ) {
         val readKey = columns.readKey ?: throw IllegalStateException("No Read column in Calibre")
         val base = baseUrl()
@@ -216,6 +233,7 @@ class CalibreSyncService @Inject constructor(
                 // Read, but date unknown ("A while ago") → leave Calibre's date alone.
             }
         }
+        if (columns.timesKey != null && timesRead != null) changes.put(columns.timesKey, timesRead)
         val body = JSONObject()
             .put("changes", changes)
             .put("loaded_book_ids", JSONArray().put(calibreBookId))
@@ -241,7 +259,7 @@ class CalibreSyncService @Inject constructor(
                 }
             }
         }
-        Timber.d("Set $readKey=$isRead for Calibre book $calibreBookId")
+        Timber.d("Set $readKey=$isRead (times read: $timesRead) for Calibre book $calibreBookId")
     }
 
     // ── Reachability ──────────────────────────────────────────────────────────
@@ -262,6 +280,290 @@ class CalibreSyncService @Inject constructor(
                 val url = base.newBuilder().addPathSegments("ajax/library-info").build()
                 quick.newCall(Request.Builder().url(url).build()).execute().use { it.isSuccessful }
             }.getOrDefault(false)
+        }
+    }
+
+    // ── Reading log (shared reading streak) ───────────────────────────────────
+
+    /**
+     * Merges [localDays] into this login's reading log in Calibre and returns
+     * every day in it (yours from all devices). Creates the log the first time.
+     * Throws if Calibre can't be reached or refuses (no permission to make changes).
+     * See [CalibreReadingLog] for how the log is stored.
+     */
+    suspend fun syncReadingLog(libraryId: String?, localDays: Set<String>): Set<String> {
+        val base = baseUrl()
+        val lib  = libraryId
+            ?: userPreferences.effectiveCalibreLibraryId.firstOrNull()
+            ?: fetchLibraryInfo().defaultId
+        val user  = userPreferences.calibreUsername.firstOrNull().orEmpty()
+        val title = CalibreReadingLog.titleFor(user)
+
+        return withContext(Dispatchers.IO) {
+            // 1. Find this login's log entry (exact title match).
+            val searchUrl = base.newBuilder()
+                .addPathSegments("ajax/search").addPathSegment(lib)
+                .addQueryParameter("query", "title:\"=$title\"")
+                .addQueryParameter("num", "5")
+                .build()
+            val logId: Int? = okHttpClient.newCall(Request.Builder().url(searchUrl).build()).execute().use { resp ->
+                if (!resp.isSuccessful) throw IOException("Calibre returned HTTP ${resp.code} when looking for the reading log")
+                val ids = JSONObject(resp.body?.string().orEmpty()).optJSONArray("book_ids")
+                if (ids != null && ids.length() > 0) ids.getInt(0) else null
+            }
+
+            // 2. Read what's already there.
+            val remoteDays: Set<String> = if (logId == null) emptySet() else {
+                val bookUrl = base.newBuilder()
+                    .addPathSegments("ajax/book").addPathSegment(logId.toString()).addPathSegment(lib)
+                    .addQueryParameter("category_urls", "false")
+                    .build()
+                okHttpClient.newCall(Request.Builder().url(bookUrl).build()).execute().use { resp ->
+                    if (!resp.isSuccessful) throw IOException("Calibre returned HTTP ${resp.code} when reading the reading log")
+                    val json = JSONObject(resp.body?.string().orEmpty())
+                    CalibreReadingLog.parseDays(if (json.isNull("comments")) null else json.optString("comments"))
+                }
+            }
+
+            val merged = remoteDays + localDays
+            if (logId != null && merged == remoteDays) return@withContext merged   // nothing new to send
+
+            // 3. Create the entry if needed (Calibre needs a file, so a tiny TXT).
+            val id = logId ?: run {
+                val addUrl = base.newBuilder()
+                    .addPathSegments("cdb/add-book")
+                    .addPathSegment(System.currentTimeMillis().toString())   // job id (any value)
+                    .addPathSegment("y")                                     // allow duplicates
+                    .addPathSegment("OmniTome Reading Log.txt")
+                    .addPathSegment(lib)
+                    .build()
+                val body = CalibreReadingLog.FILE_TEXT.toByteArray()
+                    .toRequestBody("application/octet-stream".toMediaType())
+                okHttpClient.newCall(Request.Builder().url(addUrl).post(body).build()).execute().use { resp ->
+                    if (!resp.isSuccessful) throw readingLogError(resp.code, resp.body?.string())
+                    JSONObject(resp.body?.string().orEmpty()).optInt("book_id", -1)
+                        .takeIf { it > 0 } ?: throw IOException("Calibre didn't create the reading log")
+                }
+            }
+
+            // 4. Write the merged list (plus title/author/tag when just created).
+            val changes = JSONObject().put("comments", CalibreReadingLog.buildComments(merged))
+            if (logId == null) {
+                changes.put("title", title)
+                    .put("authors", JSONArray().put(CalibreReadingLog.AUTHOR))
+                    .put("tags", JSONArray().put(CalibreReadingLog.TAG))
+            }
+            val setUrl = base.newBuilder()
+                .addPathSegments("cdb/set-fields").addPathSegment(id.toString()).addPathSegment(lib)
+                .build()
+            val setBody = JSONObject().put("changes", changes)
+                .put("loaded_book_ids", JSONArray().put(id))
+                .toString().toRequestBody(jsonType)
+            okHttpClient.newCall(Request.Builder().url(setUrl).post(setBody).build()).execute().use { resp ->
+                if (!resp.isSuccessful) throw readingLogError(resp.code, resp.body?.string())
+            }
+            Timber.d("Reading log '$title': ${merged.size} day(s) (${(merged - remoteDays).size} new)")
+            merged
+        }
+    }
+
+    private fun readingLogError(code: Int, body: String?): IOException {
+        val reason = body.orEmpty().trim().take(200)
+        return IOException(
+            when (code) {
+                401, 403 -> "Calibre refused the reading log (HTTP $code)" +
+                            (if (reason.isNotBlank()) ": $reason." else ".") +
+                            " In Calibre, give this user permission to make changes."
+                else     -> "Calibre returned HTTP $code when saving the reading log" +
+                            (if (reason.isNotBlank()) ": $reason" else "")
+            }
+        )
+    }
+
+    // ── Shelves ───────────────────────────────────────────────────────────────
+
+    /** Sets one book's Shelves column in Calibre. Throws on failure (kept for next time). */
+    suspend fun pushShelves(calibreBookId: Int, libraryId: String?, shelvesKey: String, shelves: List<String>) {
+        val base = baseUrl()
+        val lib  = libraryId
+            ?: userPreferences.effectiveCalibreLibraryId.firstOrNull()
+            ?: fetchLibraryInfo().defaultId
+        val body = JSONObject()
+            .put("changes", JSONObject().put(shelvesKey, JSONArray(shelves)))
+            .put("loaded_book_ids", JSONArray().put(calibreBookId))
+            .toString().toRequestBody(jsonType)
+        val url = base.newBuilder()
+            .addPathSegments("cdb/set-fields").addPathSegment(calibreBookId.toString()).addPathSegment(lib)
+            .build()
+        withContext(Dispatchers.IO) {
+            okHttpClient.newCall(Request.Builder().url(url).post(body).build()).execute().use { resp ->
+                if (!resp.isSuccessful) {
+                    val reason = resp.body?.string().orEmpty().trim().take(200)
+                    throw IOException("Calibre returned HTTP ${resp.code} when saving shelves" +
+                        (if (reason.isNotBlank()) ": $reason" else ""))
+                }
+            }
+        }
+    }
+
+    // ── Star rating ("Rate Book") ─────────────────────────────────────────────
+
+    /**
+     * Sets one book's star rating in Calibre's built-in Rating field.
+     * [stars] 1–5, or null to clear it.
+     *
+     * Calibre's database keeps ratings as 0–10 (two points per star) and
+     * /cdb/set-fields stores the number exactly as sent, so stars are doubled
+     * here. (Calibre's /ajax/books sends ratings back already halved to stars.)
+     * Throws on failure so the caller can keep the change for next time.
+     */
+    suspend fun pushRating(calibreBookId: Int, libraryId: String?, stars: Float?) {
+        val value = Math.round((stars ?: 0f).coerceIn(0f, 5f) * 2f)
+        val base = baseUrl()
+        val lib  = libFor(libraryId)
+        val body = JSONObject()
+            .put("changes", JSONObject().put("rating", value))
+            .put("loaded_book_ids", JSONArray().put(calibreBookId))
+            .toString().toRequestBody(jsonType)
+        val url = base.newBuilder()
+            .addPathSegments("cdb/set-fields").addPathSegment(calibreBookId.toString()).addPathSegment(lib)
+            .build()
+        withContext(Dispatchers.IO) {
+            okHttpClient.newCall(Request.Builder().url(url).post(body).build()).execute().use { resp ->
+                if (!resp.isSuccessful) {
+                    val reason = resp.body?.string().orEmpty().trim().take(200)
+                    throw IOException(
+                        when (resp.code) {
+                            401, 403 -> "Calibre refused the rating (HTTP ${resp.code})" +
+                                        (if (reason.isNotBlank()) ": $reason." else ".") +
+                                        " In Calibre, give this user permission to make changes."
+                            else     -> "Calibre returned HTTP ${resp.code} when saving the rating" +
+                                        (if (reason.isNotBlank()) ": $reason" else "")
+                        }
+                    )
+                }
+            }
+        }
+        Timber.d("Set rating=$stars★ for Calibre book $calibreBookId")
+    }
+
+    // ── Settings → Read Tracking ──────────────────────────────────────────────
+
+    /** What the Read Tracking pickers need: the library's columns + what Automatic finds. */
+    data class LibraryColumns(
+        val columns: List<CalibreColumnInfo>,
+        val automatic: CalibreReadColumns
+    )
+
+    /**
+     * Lists the custom columns of a library, by looking at its first book
+     * (every book carries every custom column). Throws if Calibre can't be
+     * reached or the library has no books yet.
+     */
+    suspend fun fetchLibraryColumns(libraryId: String?): LibraryColumns {
+        val lib = libFor(libraryId)
+        val firstId = searchBookIds("", lib, limit = 1).firstOrNull()
+            ?: throw IOException("This Calibre library has no books yet, so its columns can't be read.")
+        val meta = fetchBookJson(firstId, lib).optJSONObject("user_metadata")
+        return LibraryColumns(
+            columns   = CalibreReadColumns.listColumns(meta),
+            automatic = CalibreReadColumns.detect(meta)
+        )
+    }
+
+    // ── Smart Shelves ─────────────────────────────────────────────────────────
+
+    /**
+     * Runs a Calibre search (GET /ajax/search/{library}?query=…) and returns the
+     * matching Calibre book ids, in Calibre's order. An empty query = every book.
+     * Throws if Calibre can't be reached or doesn't understand the search.
+     */
+    suspend fun searchBookIds(query: String, libraryId: String?, limit: Int = 100_000): List<Int> {
+        val base = baseUrl()
+        val lib  = libFor(libraryId)
+        val url = base.newBuilder()
+            .addPathSegments("ajax/search")
+            .addPathSegment(lib)
+            .addQueryParameter("query", query)
+            .addQueryParameter("num", limit.toString())
+            .build()
+        return withContext(Dispatchers.IO) {
+            okHttpClient.newCall(Request.Builder().url(url).build()).execute().use { resp ->
+                if (!resp.isSuccessful) {
+                    val reason = resp.body?.string().orEmpty().trim().take(200)
+                    throw IOException(
+                        "Calibre couldn't run that search (HTTP ${resp.code})" +
+                        (if (reason.isNotBlank()) ": $reason" else ".")
+                    )
+                }
+                val arr = JSONObject(resp.body?.string().orEmpty()).optJSONArray("book_ids") ?: JSONArray()
+                (0 until arr.length()).map { arr.getInt(it) }
+            }
+        }
+    }
+
+    // ── Format conversion (MOBI / AZW3 / comics → EPUB) ────────────────────────
+
+    /**
+     * Asks the Calibre server to convert one book to EPUB and waits for it.
+     * Calibre adds the EPUB to the book (keeping the original), exactly like
+     * "Convert books" in the Calibre app. [onProgress] gets 0.0–1.0.
+     * Needs a Calibre user allowed to make changes. Throws on failure.
+     */
+    suspend fun convertToEpub(
+        calibreBookId: Int,
+        libraryId: String?,
+        inputFormat: String,
+        onProgress: (Float) -> Unit
+    ) {
+        val base = baseUrl()
+        val lib  = libraryId
+            ?: userPreferences.effectiveCalibreLibraryId.firstOrNull()
+            ?: fetchLibraryInfo().defaultId
+        fun refused(code: Int, body: String?) = IOException(
+            when (code) {
+                401, 403 -> "Calibre won't convert books for this user (HTTP $code). " +
+                            "In Calibre, give this user permission to make changes."
+                else     -> "Calibre couldn't start the conversion (HTTP $code)" +
+                            (body?.trim()?.take(200)?.let { ": $it" } ?: "")
+            }
+        )
+        val jobId: Int = withContext(Dispatchers.IO) {
+            val url = base.newBuilder().addPathSegments("conversion/start").addPathSegment(calibreBookId.toString())
+                .addQueryParameter("library_id", lib).build()
+            val body = JSONObject().put("input_fmt", inputFormat.uppercase())
+                .put("output_fmt", "epub").put("options", JSONObject()).toString().toRequestBody(jsonType)
+            okHttpClient.newCall(Request.Builder().url(url).post(body).build()).execute().use { resp ->
+                val text = resp.body?.string()
+                if (!resp.isSuccessful) throw refused(resp.code, text)
+                text?.trim()?.toIntOrNull() ?: throw IOException("Calibre didn't start the conversion")
+            }
+        }
+        Timber.d("Calibre conversion job $jobId: $inputFormat → EPUB for book $calibreBookId")
+
+        // Poll until done (Calibre only adds the EPUB to the book once asked for the result).
+        val deadline = System.currentTimeMillis() + 15 * 60_000L
+        while (true) {
+            kotlinx.coroutines.delay(1_500)
+            val status = withContext(Dispatchers.IO) {
+                val url = base.newBuilder().addPathSegments("conversion/status").addPathSegment(jobId.toString())
+                    .addQueryParameter("library_id", lib).build()
+                okHttpClient.newCall(Request.Builder().url(url).post("{}".toRequestBody(jsonType)).build()).execute().use { resp ->
+                    if (!resp.isSuccessful) throw IOException("Calibre returned HTTP ${resp.code} while converting")
+                    JSONObject(resp.body?.string().orEmpty())
+                }
+            }
+            if (status.optBoolean("running")) {
+                onProgress(status.optDouble("percent", 0.0).toFloat().coerceIn(0f, 1f))
+                if (System.currentTimeMillis() > deadline) throw IOException("Calibre is taking too long to convert this book")
+                continue
+            }
+            if (!status.optBoolean("ok")) {
+                Timber.w("Calibre conversion failed: ${status.optString("traceback").take(500)}")
+                throw IOException("Calibre couldn't convert this book to EPUB. Try converting it in the Calibre app.")
+            }
+            onProgress(1f)
+            return
         }
     }
 }

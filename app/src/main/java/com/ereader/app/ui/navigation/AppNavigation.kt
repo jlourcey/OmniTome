@@ -28,12 +28,15 @@ import com.ereader.app.ui.reader.ReaderActivity
 import com.ereader.app.ui.settings.SettingsScreen
 import com.ereader.app.ui.setup.CalibreSetupScreen
 import com.ereader.app.ui.splash.SplashScreen
+import com.ereader.app.ui.welcome.TOUR_VERSION
 import com.ereader.app.ui.welcome.WelcomeScreen
+import com.ereader.app.ui.welcome.WhatsNewScreen
 
 // ── Route constants ───────────────────────────────────────────────────────────
 private const val ROUTE_SETUP   = "setup"
 private const val ROUTE_SPLASH  = "splash"
 private const val ROUTE_WELCOME = "welcome"
+private const val ROUTE_WHATS_NEW = "whats_new"
 
 // ── Route definitions ─────────────────────────────────────────────────────────
 
@@ -50,7 +53,8 @@ sealed class Screen(
     val icon: ImageVector
 ) {
     data object Library   : Screen("library",   "Library",   Icons.Default.LibraryBooks)
-    data object Favorites : Screen("favorites", "Favorites", Icons.Default.Favorite)
+    // Favorites + your own shelves (route name kept so existing links still work)
+    data object Favorites : Screen("favorites", "Shelves",   Icons.Default.CollectionsBookmark)
     data object Downloads : Screen("downloads", "Local",     Icons.Default.PhoneAndroid)
     data object Settings  : Screen("settings",  "Settings",  Icons.Default.Settings)
 }
@@ -89,6 +93,10 @@ fun AppNavigation(
     val hasSeenWelcome by userPreferences.hasSeenWelcome
         .collectAsStateWithLifecycle(initialValue = true) // default true avoids flash on re-launch
 
+    // After a big update (TOUR_VERSION raised), offer the tour again once.
+    val tourVersionSeen by userPreferences.tourVersionSeen
+        .collectAsStateWithLifecycle(initialValue = TOUR_VERSION)
+
     // Always start at the splash screen; it decides where to go next.
     NavHost(navController = navController, startDestination = ROUTE_SPLASH) {
 
@@ -97,8 +105,9 @@ fun AppNavigation(
             SplashScreen(
                 onSplashComplete = {
                     val next = when {
-                        !hasSeenWelcome  -> ROUTE_WELCOME
-                        calibreConfigured -> Screen.Library.route
+                        !hasSeenWelcome                 -> ROUTE_WELCOME
+                        tourVersionSeen < TOUR_VERSION  -> ROUTE_WHATS_NEW
+                        calibreConfigured               -> Screen.Library.route
                         else             -> ROUTE_SETUP
                     }
                     navController.navigate(next) {
@@ -116,6 +125,18 @@ fun AppNavigation(
                     val next = if (calibreConfigured) Screen.Library.route else ROUTE_SETUP
                     navController.navigate(next) {
                         popUpTo(ROUTE_WELCOME) { inclusive = true }
+                    }
+                }
+            )
+        }
+
+        // ── What's new (once, after a big update) ───────────────────────────
+        composable(ROUTE_WHATS_NEW) {
+            WhatsNewScreen(
+                onComplete = {
+                    val next = if (calibreConfigured) Screen.Library.route else ROUTE_SETUP
+                    navController.navigate(next) {
+                        popUpTo(ROUTE_WHATS_NEW) { inclusive = true }
                     }
                 }
             )
@@ -265,11 +286,29 @@ private fun AppNavHost(
                 onNotesClick = { book ->
                     navController.navigate("notes/${book.id}")
                 },
+                onSearchInsideBooks = { navController.navigate("search-text") },
                 onEditClick = { book ->
                     navController.navigate("edit/${book.id}")
                 },
                 onSeriesClick = { series ->
                     navController.navigate("series/${series.encodeUrlSegment()}")
+                }
+            )
+        }
+
+        // ── Search inside books ─────────────────────────────────────────────
+        composable("search-text") {
+            com.ereader.app.ui.search.SearchInBooksScreen(
+                onBack       = { navController.popBackStack() },
+                onOpenResult = { book, href, progression, words ->
+                    val intent = Intent(context, ReaderActivity::class.java).apply {
+                        putExtra(ReaderActivity.EXTRA_BOOK_ID, book.id)
+                        putExtra(ReaderActivity.EXTRA_BOOK_TITLE, book.title)
+                        putExtra(ReaderActivity.EXTRA_GOTO_HREF, href)
+                        progression?.let { putExtra(ReaderActivity.EXTRA_GOTO_PROGRESSION, it) }
+                        putStringArrayListExtra(ReaderActivity.EXTRA_HIGHLIGHT_WORDS, ArrayList(words))
+                    }
+                    context.startActivity(intent)
                 }
             )
         }
