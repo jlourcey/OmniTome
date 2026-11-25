@@ -15,8 +15,6 @@ import android.webkit.WebView
 import android.widget.Toast
 import androidx.activity.viewModels
 import androidx.appcompat.app.AppCompatActivity
-import androidx.compose.runtime.collectAsState
-import androidx.compose.runtime.getValue
 import androidx.compose.ui.platform.ComposeView
 import androidx.compose.ui.platform.ViewCompositionStrategy
 import androidx.lifecycle.Lifecycle
@@ -1018,17 +1016,6 @@ class ReaderActivity : AppCompatActivity() {
                         onStopReading        = { stopReading() },
                         onClose              = { stopReading(); finish() }
                     )
-
-                    // ── Just finished the book → rating popup ─────────────────
-                    val finishedBook by viewModel.finishedBook.collectAsState()
-                    finishedBook?.let { book ->
-                        com.ereader.app.ui.bookshelf.RatingDialog(
-                            book         = book,
-                            justFinished = true,
-                            onDismiss    = viewModel::dismissFinishedRating,
-                            onSave       = { stars -> viewModel.rateFinishedBook(book, stars) }
-                        )
-                    }
                 }
             }
         }

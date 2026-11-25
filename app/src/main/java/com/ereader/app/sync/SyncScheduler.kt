@@ -97,8 +97,7 @@ class SyncScheduler @Inject constructor(
     /** True if any Calibre book has notes, a page or a Read status not yet sent. */
     suspend fun hasPending(): Boolean =
         bookDao.getBooksWithUnsyncedNotes().isNotEmpty() ||
-        bookDao.getBooksWithUnsyncedReadStatus().isNotEmpty() ||
-        bookDao.getBooksWithUnsyncedRating().isNotEmpty()
+        bookDao.getBooksWithUnsyncedReadStatus().isNotEmpty()
 
     /**
      * Called once when the app starts: queues a sync if anything is waiting,

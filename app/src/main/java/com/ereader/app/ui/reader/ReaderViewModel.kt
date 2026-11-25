@@ -286,30 +286,7 @@ class ReaderViewModel @Inject constructor(
         viewModelScope.launch {
             val locatorJson = locator.toJSON().toString()
             val progress    = locator.locations.totalProgression?.toFloat() ?: return@launch
-            val justFinished = repository.saveReadingProgress(state.bookId, locatorJson, progress, pageTurn)
-            // Reached the last pages → offer to rate it (not if it already has a rating).
-            if (justFinished) {
-                val book = repository.getBookById(state.bookId)
-                if (book != null && book.rating == null) _finishedBook.value = book
-            }
-        }
-    }
-
-    // ── Finished the book → "How would you rate it?" ──────────────────────────
-
-    private val _finishedBook = MutableStateFlow<Book?>(null)
-    /** Set when the reader just reached the end of an unrated book; the HUD shows the rating popup. */
-    val finishedBook: StateFlow<Book?> = _finishedBook.asStateFlow()
-
-    fun dismissFinishedRating() { _finishedBook.value = null }
-
-    /** "Save" in the finished-book rating popup. */
-    fun rateFinishedBook(book: Book, stars: Int?) {
-        _finishedBook.value = null
-        if (stars == null) return
-        viewModelScope.launch {
-            runCatching { repository.setRating(book, stars) }
-                .onFailure { Timber.w(it, "Could not save rating for '${book.title}'") }
+            repository.saveReadingProgress(state.bookId, locatorJson, progress, pageTurn)
         }
     }
 

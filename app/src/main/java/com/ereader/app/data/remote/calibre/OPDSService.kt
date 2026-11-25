@@ -363,13 +363,7 @@ class OPDSService @Inject constructor(
         /** Calibre's Read value (only meaningful when readColumns.readKey != null). */
         val isRead: Boolean = false,
         /** Calibre's Date Read as epoch ms, or null. */
-        val readAt: Long? = null,
-        /** Calibre's Times Read count (only meaningful when readColumns.timesKey != null). */
-        val timesRead: Int = 0,
-        /** Calibre's star rating, 1–5, or null for none. */
-        val rating: Int? = null,
-        /** False if Calibre's answer had no "rating" field at all — then ours is left alone. */
-        val ratingKnown: Boolean = false
+        val readAt: Long? = null
     )
 
     /**
@@ -420,18 +414,12 @@ class OPDSService @Inject constructor(
         }
         Timber.d("OPDSService: JSON API found ${bookIds.size} total books, fetching series metadata…")
 
-        // Which Read / Date Read / Times Read columns the user picked in Settings
-        // (Automatic unless changed). Stored per library.
-        val columnChoice = userPreferences.getReadColumnChoice(
-            libraryId ?: userPreferences.effectiveCalibreLibraryId.first()
-        )
-
         // Step 2 — batch-fetch metadata in chunks of 100 (avoids huge URLs)
         val result = mutableListOf<SeriesInfo>()
         for (chunk in bookIds.chunked(100)) {
             val booksJson = httpGet(
                 "$baseUrl/ajax/books$libPath?ids=${chunk.joinToString(",")}" +
-                "&fields=title,authors,series,series_index,tags,rating&category_urls=false"
+                "&fields=title,authors,series,series_index,tags&category_urls=false"
             ) ?: continue
 
             try {
@@ -463,12 +451,9 @@ class OPDSService @Inject constructor(
 
                     // Read status lives in a custom column ("user_metadata") — see CalibreReadColumns.
                     val userMeta    = book.optJSONObject("user_metadata")
-                    val readColumns = CalibreReadColumns.detect(userMeta, columnChoice)
+                    val readColumns = CalibreReadColumns.detect(userMeta)
                     val isRead      = readColumns.readKey?.let { CalibreReadColumns.readValue(userMeta, it) } ?: false
                     val readAt      = CalibreReadColumns.dateValue(userMeta, readColumns.dateKey)
-                    val timesRead   = CalibreReadColumns.timesValue(userMeta, readColumns.timesKey)
-                    // Calibre's own star rating (built in, not a custom column).
-                    val rating      = CalibreReadColumns.ratingStars(book)
 
                     // Emit a SeriesInfo for every book — even if it has no series
                     // or tags — so we can always back-fill the calibreBookId.
@@ -482,10 +467,7 @@ class OPDSService @Inject constructor(
                             calibreBookId    = idStr.toIntOrNull() ?: 0,
                             readColumns      = readColumns,
                             isRead           = isRead,
-                            readAt           = readAt,
-                            timesRead        = timesRead,
-                            rating           = rating,
-                            ratingKnown      = book.has("rating")
+                            readAt           = readAt
                         )
                     }
                 }

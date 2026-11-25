@@ -9,11 +9,8 @@ import androidx.datastore.preferences.core.floatPreferencesKey
 import androidx.datastore.preferences.core.intPreferencesKey
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
-import com.ereader.app.data.remote.calibre.ReadColumnChoice
-import com.ereader.app.domain.model.SmartShelf
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.flow.Flow
-import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
 import org.json.JSONArray
 import org.json.JSONObject
@@ -244,92 +241,5 @@ class UserPreferences @Inject constructor(
 
     suspend fun saveReaderTheme(theme: String) {
         context.dataStore.edit { prefs -> prefs[KEY_READER_THEME] = theme }
-    }
-
-    // ── Read Tracking columns (Settings → Read Tracking) ──────────────────────
-    //
-    // Stored per Calibre library, because each library can have its own columns.
-    // Key: "read_columns_<library id>"  Value: {"read":"#read","date":"","times":"-"}
-
-    private fun readColumnsKey(libraryId: String) = stringPreferencesKey("read_columns_$libraryId")
-
-    /** The column picks for one library (all Automatic if never changed). */
-    suspend fun getReadColumnChoice(libraryId: String?): ReadColumnChoice {
-        if (libraryId == null) return ReadColumnChoice.DEFAULT
-        val raw = context.dataStore.data.first()[readColumnsKey(libraryId)] ?: return ReadColumnChoice.DEFAULT
-        return runCatching {
-            val o = JSONObject(raw)
-            ReadColumnChoice(
-                read  = o.optString("read"),
-                date  = o.optString("date"),
-                times = o.optString("times")
-            )
-        }.getOrDefault(ReadColumnChoice.DEFAULT)
-    }
-
-    /** Live version of [getReadColumnChoice] — used by the Settings screen. */
-    fun observeReadColumnChoice(libraryId: String): Flow<ReadColumnChoice> = context.dataStore.data
-        .map { prefs ->
-            runCatching {
-                val o = JSONObject(prefs[readColumnsKey(libraryId)] ?: "{}")
-                ReadColumnChoice(o.optString("read"), o.optString("date"), o.optString("times"))
-            }.getOrDefault(ReadColumnChoice.DEFAULT)
-        }
-
-    suspend fun saveReadColumnChoice(libraryId: String, choice: ReadColumnChoice) {
-        val json = JSONObject()
-            .put("read", choice.read)
-            .put("date", choice.date)
-            .put("times", choice.times)
-            .toString()
-        context.dataStore.edit { prefs -> prefs[readColumnsKey(libraryId)] = json }
-    }
-
-    // ── Smart Shelves ─────────────────────────────────────────────────────────
-    //
-    // Stored per Calibre library as a JSON list:
-    //   [{"id":"…","name":"Unread Fantasy","query":"tags:Fantasy and #read:false",
-    //     "ids":[12,40,77],"updatedAt":1732500000000}, …]
-    // "ids" = the Calibre book ids that matched the last time Calibre was asked,
-    // so the shelf still works with no connection.
-
-    private fun smartShelvesKey(libraryId: String) = stringPreferencesKey("smart_shelves_$libraryId")
-
-    private fun parseShelves(raw: String?): List<SmartShelf> = runCatching {
-        val arr = JSONArray(raw ?: "[]")
-        (0 until arr.length()).map { i ->
-            val o   = arr.getJSONObject(i)
-            val ids = o.optJSONArray("ids") ?: JSONArray()
-            SmartShelf(
-                id         = o.getString("id"),
-                name       = o.optString("name"),
-                query      = o.optString("query"),
-                calibreIds = (0 until ids.length()).map { ids.getInt(it) },
-                updatedAt  = o.optLong("updatedAt", 0L)
-            )
-        }
-    }.getOrDefault(emptyList())
-
-    /** The Smart Shelves of one library, in the order they were made. */
-    fun observeSmartShelves(libraryId: String): Flow<List<SmartShelf>> = context.dataStore.data
-        .map { prefs -> parseShelves(prefs[smartShelvesKey(libraryId)]) }
-
-    suspend fun getSmartShelves(libraryId: String): List<SmartShelf> =
-        parseShelves(context.dataStore.data.first()[smartShelvesKey(libraryId)])
-
-    suspend fun saveSmartShelves(libraryId: String, shelves: List<SmartShelf>) {
-        val json = JSONArray().apply {
-            shelves.forEach { s ->
-                put(
-                    JSONObject()
-                        .put("id", s.id)
-                        .put("name", s.name)
-                        .put("query", s.query)
-                        .put("ids", JSONArray(s.calibreIds))
-                        .put("updatedAt", s.updatedAt)
-                )
-            }
-        }.toString()
-        context.dataStore.edit { prefs -> prefs[smartShelvesKey(libraryId)] = json }
     }
 }

@@ -151,19 +151,9 @@ class NotesSyncRepository @Inject constructor(
             try {
                 val cols = columns ?: calibreSync.fetchReadColumns(calibreId, book.libraryKey)
                 if (cols.readKey == null) return@withContext ReadPushResult.NoReadColumn
-
-                // Times Read: add the finishes recorded here to Calibre's CURRENT count
-                // (read fresh, so a number changed on the PC since the last sync isn't lost).
-                val sentPending = book.pendingReads
-                val newTimesRead = if (cols.timesKey != null && sentPending > 0) {
-                    val meta = calibreSync.fetchBookJson(calibreId, book.libraryKey).optJSONObject("user_metadata")
-                    CalibreReadColumns.timesValue(meta, cols.timesKey) + sentPending
-                } else null
-
-                calibreSync.pushReadStatus(calibreId, book.libraryKey, cols, book.isRead, book.readAt, newTimesRead)
+                calibreSync.pushReadStatus(calibreId, book.libraryKey, cols, book.isRead, book.readAt)
                 // Only clear if nothing changed while we were sending.
                 bookDao.clearReadStatusDirty(bookId, book.isRead)
-                if (newTimesRead != null) bookDao.applyTimesReadPushed(bookId, newTimesRead, sentPending)
                 ReadPushResult.Synced
             } catch (e: CancellationException) {
                 throw e
@@ -185,39 +175,6 @@ class NotesSyncRepository @Inject constructor(
         if (pending.isEmpty()) return 0
         Timber.d("Syncing Read status for ${pending.size} book(s)")
         return pending.count { pushReadStatus(it.id, columns) == ReadPushResult.Synced }
-    }
-
-    // ── Star rating ───────────────────────────────────────────────────────────
-
-    /**
-     * Sends one book's star rating to Calibre's Rating field.
-     * On any failure it stays pending and is retried on the next sync.
-     */
-    suspend fun pushRating(bookId: String): ReadPushResult = withContext(Dispatchers.IO) {
-        val book = bookDao.getById(bookId) ?: return@withContext ReadPushResult.NotLinked
-        val calibreId = book.calibreBookId ?: return@withContext ReadPushResult.NotLinked
-        try {
-            calibreSync.pushRating(calibreId, book.libraryKey, book.rating)
-            bookDao.clearRatingDirty(bookId, book.rating)
-            ReadPushResult.Synced
-        } catch (e: CancellationException) {
-            throw e
-        } catch (e: Exception) {
-            Timber.w(e, "Rating sync failed for '${book.title}'")
-            ReadPushResult.Failed(e)
-        }
-    }
-
-    /**
-     * Sends every pending rating (for [libraryKey], or all libraries when null).
-     * @return how many books were synced.
-     */
-    suspend fun syncAllPendingRatings(libraryKey: String?): Int {
-        val pending = bookDao.getBooksWithUnsyncedRating()
-            .filter { libraryKey == null || it.libraryKey == null || it.libraryKey == libraryKey }
-        if (pending.isEmpty()) return 0
-        Timber.d("Syncing ratings for ${pending.size} book(s)")
-        return pending.count { pushRating(it.id) == ReadPushResult.Synced }
     }
 
     // ── Helpers ───────────────────────────────────────────────────────────────

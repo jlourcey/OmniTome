@@ -30,8 +30,6 @@ import javax.inject.Singleton
  *   MIGRATION_6_7 — adds `books.libraryKey` so books from several Calibre
  *                   libraries can live side by side. Nothing is lost.
  *   MIGRATION_7_8 — adds the Read status columns and the `reading_days` table.
- *   MIGRATION_8_9 — adds `books.timesRead`, `books.pendingReads` (Times Read
- *                   counter) and `books.rating`, `books.ratingDirty` (star ratings).
  *                   Books you already read to the end become "Read". Nothing is lost.
  */
 @Module
@@ -180,20 +178,6 @@ object DatabaseModule {
         }
     }
 
-    /**
-     * v8 → v9: Times Read counter and star ratings.
-     * Every existing book starts at 0 reads / no rating; the next library sync
-     * copies the real values over from Calibre.
-     */
-    private val MIGRATION_8_9 = object : Migration(8, 9) {
-        override fun migrate(db: SupportSQLiteDatabase) {
-            db.execSQL("ALTER TABLE books ADD COLUMN timesRead INTEGER NOT NULL DEFAULT 0")
-            db.execSQL("ALTER TABLE books ADD COLUMN pendingReads INTEGER NOT NULL DEFAULT 0")
-            db.execSQL("ALTER TABLE books ADD COLUMN rating INTEGER")
-            db.execSQL("ALTER TABLE books ADD COLUMN ratingDirty INTEGER NOT NULL DEFAULT 0")
-        }
-    }
-
     @Provides
     @Singleton
     fun provideDatabase(@ApplicationContext context: Context): AppDatabase =
@@ -202,7 +186,7 @@ object DatabaseModule {
             AppDatabase::class.java,
             "ereader.db"
         )
-        .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6, MIGRATION_6_7, MIGRATION_7_8, MIGRATION_8_9)
+        .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6, MIGRATION_6_7, MIGRATION_7_8)
         .fallbackToDestructiveMigrationOnDowngrade()
         .build()
 

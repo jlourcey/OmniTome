@@ -15,7 +15,6 @@ import com.ereader.app.data.remote.calibre.OPDSService
 import com.ereader.app.data.remote.drive.DriveService
 import com.ereader.app.domain.model.Book
 import com.ereader.app.domain.model.ReadingStreak
-import com.ereader.app.domain.model.SmartShelf
 import com.ereader.app.domain.model.normalize
 import com.ereader.app.domain.model.toDomain
 import com.ereader.app.domain.model.toEntity
@@ -261,23 +260,6 @@ class BookRepository @Inject constructor(
                             calibreReadAt = info.readAt
                         )
                     }
-                    // Times Read count from Calibre's "Times Read" column, if it has one.
-                    if (info.calibreBookId > 0 && info.readColumns.timesKey != null) {
-                        bookDao.applyCalibreTimesRead(
-                            libraryKey    = libraryId.orEmpty(),
-                            calibreBookId = info.calibreBookId,
-                            timesRead     = info.timesRead
-                        )
-                    }
-                    // Star rating from Calibre (skipped for books rated in OmniTome
-                    // and not sent yet).
-                    if (info.calibreBookId > 0 && info.ratingKnown) {
-                        bookDao.applyCalibreRating(
-                            libraryKey    = libraryId.orEmpty(),
-                            calibreBookId = info.calibreBookId,
-                            rating        = info.rating
-                        )
-                    }
                     // Always back-fill series (Calibre is the source of truth)
                     if (info.seriesName.isNotBlank()) {
                         bookDao.backfillSeriesMetadata(
@@ -322,17 +304,6 @@ class BookRepository @Inject constructor(
             runCatching { notesSync.syncAllPendingReadStatus(libraryId, readColumns) }
                 .onSuccess { if (it > 0) Timber.d("Synced Read status for $it book(s) to Calibre") }
                 .onFailure { Timber.e(it, "Automatic Read status sync failed") }
-
-            // Star ratings changed in OmniTome.
-            runCatching { notesSync.syncAllPendingRatings(libraryId) }
-                .onSuccess { if (it > 0) Timber.d("Synced ratings for $it book(s) to Calibre") }
-                .onFailure { Timber.e(it, "Automatic rating sync failed") }
-
-            // ── Phase 4: refresh Smart Shelves for this library ──────────────
-            if (libraryId != null) {
-                runCatching { refreshSmartShelves(libraryId) }
-                    .onFailure { Timber.e(it, "Smart Shelf refresh failed") }
-            }
         }
 
         Timber.d("Library sync complete")
@@ -516,84 +487,6 @@ class BookRepository @Inject constructor(
 
     suspend fun toggleFavorite(bookId: String, isFavorite: Boolean) {
         bookDao.setFavorite(bookId, isFavorite)
-    }
-
-    // ── Star rating ───────────────────────────────────────────────────────────
-
-    /**
-     * Rates a book 1–5 stars ([stars] = null clears the rating).
-     * Saved straight away; for Calibre books it's then sent to Calibre's Rating
-     * field if Calibre can be reached, otherwise at the next sync from home.
-     */
-    suspend fun setRating(book: Book, stars: Int?): ReadPushResult {
-        val linked = book.source == BookSource.CALIBRE && book.calibreBookId != null
-        bookDao.setRating(book.id, stars?.coerceIn(1, 5), dirty = linked)
-        if (!linked) return ReadPushResult.NotLinked
-        val result = notesSync.pushRating(book.id)
-        if (result is ReadPushResult.Failed) syncScheduler.schedule()
-        return result
-    }
-
-    // ── Smart Shelves ─────────────────────────────────────────────────────────
-
-    /** The library whose Smart Shelves are showing (the one picked in the switch). */
-    private suspend fun shelfLibrary(): String? = userPreferences.effectiveCalibreLibraryId.first()
-
-    /** Smart Shelves of the library picked in the bookshelf switch. */
-    fun observeSmartShelves(): Flow<List<SmartShelf>> =
-        userPreferences.effectiveCalibreLibraryId.flatMapLatest { lib ->
-            if (lib == null) kotlinx.coroutines.flow.flowOf(emptyList())
-            else userPreferences.observeSmartShelves(lib)
-        }
-
-    /**
-     * Creates a new Smart Shelf, or changes an existing one when [shelfId] is given.
-     * Asks Calibre to run the search first, so a typo is caught straight away.
-     * @return the saved shelf (with how many books matched).
-     */
-    suspend fun saveSmartShelf(shelfId: String?, name: String, query: String): Result<SmartShelf> = runCatching {
-        val lib = shelfLibrary()
-            ?: throw IllegalStateException("Sync your Calibre library once before making a Smart Shelf.")
-        val cleanName  = name.trim().ifBlank { throw IllegalArgumentException("Give the shelf a name.") }
-        val cleanQuery = query.trim()
-        val ids = calibreSyncService.searchBookIds(cleanQuery, lib)
-        val shelf = SmartShelf(
-            id         = shelfId ?: UUID.randomUUID().toString(),
-            name       = cleanName,
-            query      = cleanQuery,
-            calibreIds = ids,
-            updatedAt  = System.currentTimeMillis()
-        )
-        val shelves = userPreferences.getSmartShelves(lib)
-        val updated = if (shelves.any { it.id == shelf.id }) {
-            shelves.map { if (it.id == shelf.id) shelf else it }
-        } else {
-            shelves + shelf
-        }
-        userPreferences.saveSmartShelves(lib, updated)
-        shelf
-    }
-
-    suspend fun deleteSmartShelf(shelfId: String) {
-        val lib = shelfLibrary() ?: return
-        userPreferences.saveSmartShelves(lib, userPreferences.getSmartShelves(lib).filterNot { it.id == shelfId })
-    }
-
-    /**
-     * Re-runs every Smart Shelf's search so the shelves pick up books added or
-     * changed in Calibre. A shelf whose search fails keeps its last results.
-     */
-    private suspend fun refreshSmartShelves(libraryId: String) {
-        val shelves = userPreferences.getSmartShelves(libraryId)
-        if (shelves.isEmpty()) return
-        val refreshed = shelves.map { shelf ->
-            runCatching { calibreSyncService.searchBookIds(shelf.query, libraryId) }
-                .map { ids -> shelf.copy(calibreIds = ids, updatedAt = System.currentTimeMillis()) }
-                .onFailure { Timber.w(it, "Smart Shelf '${shelf.name}' search failed — keeping last results") }
-                .getOrDefault(shelf)
-        }
-        userPreferences.saveSmartShelves(libraryId, refreshed)
-        Timber.d("Refreshed ${refreshed.size} Smart Shelf/Shelves")
     }
 
     /**
