@@ -42,7 +42,11 @@ data class Book(
     /** Finished — drawn faded on the shelves. Synced with Calibre's "Read" column. */
     val isRead: Boolean          = false,
     /** When it was finished (epoch ms); null = unknown. */
-    val readAt: Long?            = null
+    val readAt: Long?            = null,
+    /** How many times it's been read (Calibre's count + finishes not sent yet). */
+    val timesRead: Int           = 0,
+    /** 1–5 stars, or null for no rating. */
+    val rating: Int?             = null
 )
 
 // ── Mapping functions ─────────────────────────────────────────────────────────
@@ -75,7 +79,8 @@ fun Book.toEntity(): BookEntity = BookEntity(
     calibreBookId    = calibreBookId,
     libraryKey       = libraryKey,
     isRead           = isRead,
-    readAt           = readAt
+    readAt           = readAt,
+    rating           = rating
 )
 
 /**
@@ -103,7 +108,9 @@ fun BookEntity.toDomain(): Book = Book(
     calibreBookId   = calibreBookId,
     libraryKey      = libraryKey,
     isRead          = isRead,
-    readAt          = readAt
+    readAt          = readAt,
+    timesRead       = timesRead + pendingReads,
+    rating          = rating
 )
 
 /**

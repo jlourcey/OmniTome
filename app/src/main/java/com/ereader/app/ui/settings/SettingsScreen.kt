@@ -375,6 +375,15 @@ fun SettingsScreen(
 
             Spacer(Modifier.height(24.dp))
 
+            // ── Section 1b: Read Tracking (which Calibre columns to use) ────
+            SettingsSectionHeader(
+                icon  = Icons.Default.TaskAlt,
+                title = "Read Tracking"
+            )
+            ReadTrackingCard()
+
+            Spacer(Modifier.height(24.dp))
+
             // ── Section 2: App Appearance ──────────────────────────────────
             SettingsSectionHeader(
                 icon  = Icons.Default.Palette,
@@ -903,6 +912,28 @@ private val faqItems = listOf(
                    "In Calibre → Preferences → Sharing → Sharing over the net → Advanced tab:\n" +
                    "Check \"Allow un-authenticated local connections to make changes\".\n\n" +
                    "This lets the app push metadata changes without a username or password, but only works while your phone is on the same local network as your PC."
+    ),
+
+    FaqItem(
+        question = "How do Times Read and star ratings work?",
+        answer   = "Star ratings: long-press a book → Rate Book, or rate it when you reach the last page. " +
+                   "Ratings are saved to Calibre's own Rating field (your Calibre user needs permission to make changes).\n\n" +
+                   "Times Read: add an \"Integers\" column called Times Read in Calibre " +
+                   "(Preferences → Add your own columns). Every time you finish a book in OmniTome, " +
+                   "its count goes up by one. If your columns have other names, pick them in " +
+                   "Settings → Read Tracking."
+    ),
+
+    FaqItem(
+        question = "What are Smart Shelves?",
+        answer   = "A Smart Shelf is a saved Calibre search that shows as its own shelf on the Library screen. " +
+                   "Tap \"+ New Shelf\" and type a search the same way you would in Calibre's search bar, for example:\n" +
+                   "• tags:\"Fantasy\" and #read:false — unread fantasy\n" +
+                   "• rating:>=4 — books rated 4 stars or more\n" +
+                   "• date:>30daysago — added in the last 30 days\n" +
+                   "• search:\"My saved search\" — one of your Calibre saved searches\n\n" +
+                   "Shelves refresh every time the library syncs and still work offline. " +
+                   "Long-press a shelf to edit or delete it."
     ),
 
     FaqItem(

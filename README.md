@@ -23,6 +23,10 @@ OmniTome is an Android e-reader that connects straight to your own **Calibre Con
 - **Multiple libraries**: one login, switch between the Calibre libraries your account can see
 - **Read status**: finished books are faded with a ✓ on your shelves; mark books read or unread, synced with a "Read" column in Calibre
 - **Reading streak**: a days-in-a-row counter, plus a "Finished this year" shelf of the books you've completed
+- **Times Read**: every finish adds one to a "Times Read" column in Calibre, so re-reads are counted
+- **Star ratings**: rate books 1–5 stars from the long-press menu or when you reach the last page; synced with Calibre's own Rating
+- **Smart Shelves**: save any Calibre search (for example `tags:"=Fantasy" and #read:false`) as its own shelf; refreshed on every sync and usable offline
+- **Read Tracking settings**: pick which of your own Calibre columns mean Read, Date Read and Times Read
 - **Automatic sync**: notes, reading position and Read status go to Calibre by themselves once your phone can reach the server again
 - **EPUB and PDF** reading, powered by the Readium SDK
 - **Customizable reading**: font, size, line spacing, margins, light/dark themes
@@ -38,7 +42,8 @@ OmniTome is an Android e-reader that connects straight to your own **Calibre Con
 - A **Calibre Content Server** you can reach from your phone ([Calibre](https://calibre-ebook.com) is free)
   - In Calibre: **Preferences → Sharing over the net → Start server** (default port `8080`)
   - To sync notes back to Calibre, your Calibre user needs **write access** to the library
-  - To sync Read status, add a **Yes/No** column with lookup name `read` in Calibre (**Preferences → Add your own columns**). An optional **Date** column named `date_read` records when you finished each book
+  - To sync Read status, add a **Yes/No** column with lookup name `read` in Calibre (**Preferences → Add your own columns**). An optional **Date** column named `date_read` records when you finished each book, and an optional **Integers** column named `times_read` counts how many times you've read it
+  - Already track these under other names? Pick your columns in OmniTome under **Settings → Read Tracking**
 
 ## Install
 

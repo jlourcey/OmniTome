@@ -7,6 +7,7 @@ import com.ereader.app.data.repository.BookRepository
 import com.ereader.app.data.repository.CalibreLibraryChoices
 import com.ereader.app.domain.model.Book
 import com.ereader.app.domain.model.ReadingStreak
+import com.ereader.app.domain.model.SmartShelf
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.FlowPreview
@@ -52,7 +53,17 @@ data class BookshelfUiState(
     val searchQuery: String     = "",
     val isLoading: Boolean      = true,
     val isSyncing: Boolean      = false,
-    val error: String?          = null
+    val error: String?          = null,
+    /** The Smart Shelf being shown, or null for the whole library. */
+    val selectedShelf: SmartShelf? = null
+)
+
+/** State of the "New / Edit Smart Shelf" popup. */
+data class ShelfEditorState(
+    /** null = making a new shelf; otherwise the shelf being changed. */
+    val editing: SmartShelf? = null,
+    val isSaving: Boolean    = false,
+    val error: String?       = null
 )
 
 // ── ViewModel ─────────────────────────────────────────────────────────────────
@@ -73,6 +84,25 @@ class BookshelfViewModel @Inject constructor(
     private val _sortAscending = MutableStateFlow(true)
     private val _isSyncing   = MutableStateFlow(false)
     private val _error       = MutableStateFlow<String?>(null)
+
+    // ── Smart Shelves ─────────────────────────────────────────────────────────
+
+    /** Smart Shelves of the library picked in the switch. */
+    val smartShelves: StateFlow<List<SmartShelf>> = repository.observeSmartShelves()
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
+
+    /** Which Smart Shelf is showing (null = the whole library). */
+    private val _selectedShelfId = MutableStateFlow<String?>(null)
+
+    /** The selected shelf, kept up to date as the shelf refreshes. */
+    private val selectedShelf: Flow<SmartShelf?> =
+        combine(_selectedShelfId, repository.observeSmartShelves()) { id, shelves ->
+            shelves.firstOrNull { it.id == id }
+        }
+
+    /** The New / Edit Smart Shelf popup — null when closed. */
+    private val _shelfEditor = MutableStateFlow<ShelfEditorState?>(null)
+    val shelfEditor: StateFlow<ShelfEditorState?> = _shelfEditor.asStateFlow()
 
     /** The most recently opened, in-progress book — shown in the "Continue Reading" banner. */
     val currentlyReading: StateFlow<Book?> = repository
@@ -109,7 +139,12 @@ class BookshelfViewModel @Inject constructor(
             else                        -> repository.observeAllBooksByDate()  // DATE_ADDED
         }
 
-        combine(booksFlow, repository.observeAllSeries()) { books, allSeries ->
+        combine(booksFlow, repository.observeAllSeries(), selectedShelf) { allBooks, allSeries, shelf ->
+            // Smart Shelf picked → only the books Calibre's search matched.
+            val books = if (shelf == null) allBooks else {
+                val ids = shelf.calibreIds.toHashSet()
+                allBooks.filter { it.calibreBookId != null && it.calibreBookId in ids }
+            }
             // Reverse the list when the user wants descending order.
             // Each DB query already returns its natural "ascending" order
             // (DATE_ADDED = newest-first, TITLE/AUTHOR = A→Z).
@@ -133,7 +168,8 @@ class BookshelfViewModel @Inject constructor(
                 searchQuery   = query,
                 isLoading     = false,
                 isSyncing     = syncing,
-                error         = error
+                error         = error,
+                selectedShelf = shelf
             )
         }
     }.stateIn(
@@ -146,7 +182,10 @@ class BookshelfViewModel @Inject constructor(
         onSyncRequested()
         // Picking a different library in the switch → load its books right away.
         viewModelScope.launch {
-            repository.activeLibraryChanges.drop(1).collect { onSyncRequested() }
+            repository.activeLibraryChanges.drop(1).collect {
+                _selectedShelfId.value = null   // shelves belong to one library
+                onSyncRequested()
+            }
         }
     }
 
@@ -303,6 +342,63 @@ class BookshelfViewModel @Inject constructor(
     /** Long-press → "Mark as Read" (read = true) or "Mark as Unread" (read = false). */
     fun onMarkRead(book: Book, read: Boolean, finishedToday: Boolean) {
         viewModelScope.launch { _error.value = setReadWithMessage(repository, book, read, finishedToday) }
+    }
+
+    /** Long-press → "Rate Book" (stars = null clears the rating). */
+    fun onRate(book: Book, stars: Int?) {
+        viewModelScope.launch { _error.value = setRatingWithMessage(repository, book, stars) }
+    }
+
+    // ── Smart Shelves ─────────────────────────────────────────────────────────
+
+    /** Tap a shelf chip (null = "All Books"). Tapping the selected shelf again shows all books. */
+    fun onShelfSelected(shelfId: String?) {
+        _selectedShelfId.value = if (shelfId == _selectedShelfId.value) null else shelfId
+    }
+
+    /** "+ New Shelf" (shelf = null) or long-press a shelf → Edit. */
+    fun onOpenShelfEditor(shelf: SmartShelf?) { _shelfEditor.value = ShelfEditorState(editing = shelf) }
+
+    fun onCloseShelfEditor() { _shelfEditor.value = null }
+
+    /** "Save" in the shelf popup: asks Calibre to run the search, then saves the shelf. */
+    fun onSaveShelf(name: String, query: String) {
+        val editor = _shelfEditor.value ?: return
+        if (editor.isSaving) return
+        _shelfEditor.value = editor.copy(isSaving = true, error = null)
+        viewModelScope.launch {
+            repository.saveSmartShelf(editor.editing?.id, name, query)
+                .onSuccess { shelf ->
+                    _shelfEditor.value = null
+                    _selectedShelfId.value = shelf.id
+                    val count = shelf.calibreIds.size
+                    _error.value = "✓ Smart Shelf \"${shelf.name}\" saved — " +
+                                   "$count book${if (count == 1) "" else "s"} in Calibre match"
+                }
+                .onFailure {
+                    _shelfEditor.value = editor.copy(
+                        isSaving = false,
+                        error    = when (it) {
+                            is java.net.UnknownHostException,
+                            is java.net.ConnectException,
+                            is java.net.SocketTimeoutException ->
+                                "Can't reach your Calibre server. Smart Shelves are made by Calibre's " +
+                                "search, so you need to be on your home network to create or edit one."
+                            else -> it.localizedMessage ?: "Couldn't save the shelf."
+                        }
+                    )
+                }
+        }
+    }
+
+    /** "Delete" in the shelf popup. */
+    fun onDeleteShelf(shelf: SmartShelf) {
+        viewModelScope.launch {
+            repository.deleteSmartShelf(shelf.id)
+            if (_selectedShelfId.value == shelf.id) _selectedShelfId.value = null
+            _shelfEditor.value = null
+            _error.value = "Smart Shelf \"${shelf.name}\" deleted"
+        }
     }
 
     fun onErrorDismissed() { _error.value = null }

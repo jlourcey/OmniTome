@@ -65,11 +65,21 @@ class PendingSyncWorker(
                 else -> Unit
             }
         }
-        Timber.d("Auto-sync: sent notes/page for $notes book(s), Read status for $read book(s)")
+        // Star ratings
+        var rated = 0
+        var ratingFailed = false
+        deps.bookDao().getBooksWithUnsyncedRating().forEach { book ->
+            when (deps.notesSync().pushRating(book.id)) {
+                ReadPushResult.Synced    -> rated++
+                is ReadPushResult.Failed -> ratingFailed = true
+                else -> Unit
+            }
+        }
+        Timber.d("Auto-sync: sent notes/page for $notes book(s), Read status for $read book(s), ratings for $rated book(s)")
 
         // Something still failed (but not just "no Read column") → try again later.
         val notesLeft = deps.bookDao().getBooksWithUnsyncedNotes().isNotEmpty()
-        if (notesLeft || readFailed) scheduler.scheduleRetry()
+        if (notesLeft || readFailed || ratingFailed) scheduler.scheduleRetry()
         return Result.success()
     }
 }
