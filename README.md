@@ -10,6 +10,11 @@
   <a href="https://github.com/jlourcey/OmniTome/releases/latest"><b>⬇ Download the latest APK</b></a>
 </p>
 
+<p align="center">
+  <a href="https://apps.obtainium.imranr.dev/redirect.html?r=obtainium://add/https://github.com/jlourcey/OmniTome"><img src="https://github.com/ImranR98/apps.obtainium.imranr.dev/raw/main/public/badge_obtainium.png" alt="Get it on Obtainium" height="54"></a>
+  <br><sub>Obtainium installs OmniTome from these releases and keeps it updated automatically.</sub>
+</p>
+
 <div align="center">
 <table>
   <tr>
@@ -100,7 +105,7 @@ OmniTome is an Android e-reader that connects straight to your own **Calibre Con
 3. Open the downloaded file. If Android asks, allow **Install unknown apps** for your browser or Files app.
 4. Tap **Install**, then open OmniTome.
 
-To update, download the newer APK from the Releases page and install it over the old one. Your books, notes, shelves and settings are kept (this includes updating from 1.x to 2.0).
+To get updates automatically, install [Obtainium](https://github.com/ImranR98/Obtainium) and tap the **Get it on Obtainium** badge above (or add `https://github.com/jlourcey/OmniTome` in Obtainium). Otherwise, download the newer APK from the Releases page and install it over the old one. Your books, notes, shelves and settings are kept (this includes updating from 1.x to 2.0).
 
 ## First-time setup
 
@@ -126,3 +131,11 @@ Release builds need your own signing key in a `keystore.properties` file, which 
 ## Privacy
 
 OmniTome only talks to the Calibre server you set up. It has no ads, no analytics, and no third-party accounts. See [omnitome_privacy_policy.html](omnitome_privacy_policy.html).
+
+## License
+
+OmniTome is free software: you can redistribute it and/or modify it under the terms of the **GNU General Public License v3.0** as published by the Free Software Foundation. It is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY. See [LICENSE](LICENSE) for the full text.
+
+Copyright © 2026 jlourcey
+
+Third-party components keep their own licenses: the Readium toolkit (BSD-3-Clause), WordNet 3.1 (see [WORDNET_LICENSE.txt](app/src/main/assets/dictionary/WORDNET_LICENSE.txt)) and the OpenDyslexic font (SIL Open Font License).
