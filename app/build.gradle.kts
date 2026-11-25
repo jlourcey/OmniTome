@@ -27,8 +27,8 @@ android {
         applicationId   = "com.omnitome.app"
         minSdk          = 26          // Android 8.0 — covers ~98 % of active devices
         targetSdk       = 35
-        versionCode     = 7
-        versionName     = "2.1.0"
+        versionCode     = 8
+        versionName     = "2.1.1"
 
         // CALIBRE_BASE_URL is intentionally empty in defaultConfig.
         // Each user enters their own Calibre server address in Settings → Calibre Server.

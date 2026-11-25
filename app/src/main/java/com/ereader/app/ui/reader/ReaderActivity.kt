@@ -470,6 +470,19 @@ class ReaderActivity : AppCompatActivity() {
         ).createFragmentFactory(
             initialLocator     = initialLocator,
             initialPreferences = preferences,
+            // Readium tells us when a page has actually finished loading. Apply the
+            // theme, font, highlights and page-curl then — the first position report
+            // arrives before the opening page has loaded, so styling done there was
+            // lost until the next page turn.
+            paginationListener = object : EpubNavigatorFragment.PaginationListener {
+                override fun onPageChanged(pageIndex: Int, totalPages: Int, locator: Locator) {}
+                override fun onPageLoaded() {
+                    val frag = navigatorFragment as? EpubNavigatorFragment ?: return
+                    injectCssAndJs(frag)
+                    injectJsHighlights(frag, viewModel.annotations.value)
+                    paintReaderContainers()
+                }
+            },
             configuration      = EpubNavigatorFragment.Configuration(
                 selectionActionModeCallback = selectionCallback
             )

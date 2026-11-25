@@ -45,6 +45,22 @@ internal fun readerHudSurface(theme: ReaderTheme): Color = when (theme) {
     ReaderTheme.PAPER -> Color(0.941f, 0.922f, 0.878f, 0.96f)
 }
 
+/**
+ * Slider colours taken from the reading theme, so phones that recolour apps
+ * from the wallpaper (Material You) can't make the sliders pale or clashing.
+ */
+@Composable
+internal fun readerSliderColors(theme: ReaderTheme): SliderColors {
+    val fg = readerHudOnSurface(theme)
+    return SliderDefaults.colors(
+        thumbColor                 = fg,
+        activeTrackColor           = fg.copy(alpha = 0.75f),
+        inactiveTrackColor         = fg.copy(alpha = 0.18f),
+        activeTickColor            = readerHudSurface(theme).copy(alpha = 1f),
+        inactiveTickColor          = fg.copy(alpha = 0.45f)
+    )
+}
+
 /** Icon / text colour for the HUD bars — readable on the matching surface. */
 internal fun readerHudOnSurface(theme: ReaderTheme): Color = when (theme) {
     ReaderTheme.DAY   -> Color(0.102f, 0.102f, 0.102f, 1f)
@@ -321,13 +337,14 @@ fun ReaderControlsHud(
                                     dragging?.let { onSeekTo(it) }
                                     dragging = null
                                 },
-                                modifier              = Modifier.weight(1f)
+                                modifier              = Modifier.weight(1f),
+                                colors                = readerSliderColors(theme),
                             )
                             Spacer(modifier = Modifier.width(10.dp))
                             Text(
                                 text  = "${(shown * 100).toInt()}%",
                                 style = MaterialTheme.typography.labelSmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                                color = readerHudOnSurface(theme).copy(alpha = 0.7f)   // reading theme, not app theme
                             )
                         }
                     }
@@ -344,7 +361,7 @@ fun ReaderControlsHud(
                                         "${formatMinutes(s.bookMinutesLeft)} left in book" +
                                         if (s.speedIsPersonal) "" else " (typical speed until it learns yours)",
                                 style = MaterialTheme.typography.labelSmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                                color = readerHudOnSurface(theme).copy(alpha = 0.7f)   // reading theme, not app theme
                             )
                         }
                         Spacer(modifier = Modifier.height(12.dp))
@@ -361,6 +378,7 @@ fun ReaderControlsHud(
                             onValueChange = { viewModel.setFontSize(it.toInt()) },
                             valueRange    = 12f..28f,
                             steps         = 7,
+                            colors        = readerSliderColors(theme),
                             modifier      = Modifier
                                 .weight(1f)
                                 .padding(horizontal = 8.dp)
@@ -370,7 +388,7 @@ fun ReaderControlsHud(
                         Text(
                             text  = "${fontSize}px",
                             style = MaterialTheme.typography.labelSmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                            color = readerHudOnSurface(theme).copy(alpha = 0.7f)   // reading theme, not app theme
                         )
                     }
 
@@ -380,7 +398,7 @@ fun ReaderControlsHud(
                     Text(
                         text  = "Theme",
                         style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                        color = readerHudOnSurface(theme).copy(alpha = 0.7f)   // reading theme, not app theme
                     )
                     Spacer(modifier = Modifier.height(4.dp))
                     Row(
@@ -399,7 +417,7 @@ fun ReaderControlsHud(
                     Text(
                         text  = "Font",
                         style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                        color = readerHudOnSurface(theme).copy(alpha = 0.7f)   // reading theme, not app theme
                     )
                     Spacer(modifier = Modifier.height(4.dp))
                     Row(
@@ -411,7 +429,19 @@ fun ReaderControlsHud(
                                 selected = fontFamily == fam,
                                 onClick  = { viewModel.setFontFamily(fam) },
                                 label    = { Text(fam.name.lowercase().replaceFirstChar { it.uppercase() }, maxLines = 1) },
-                                modifier = Modifier.weight(1f)
+                                modifier = Modifier.weight(1f),
+                                // Colours follow the reading theme so they stay readable on Night too.
+                                colors   = FilterChipDefaults.filterChipColors(
+                                    labelColor             = readerHudOnSurface(theme),
+                                    selectedContainerColor = readerHudOnSurface(theme).copy(alpha = 0.16f),
+                                    selectedLabelColor     = readerHudOnSurface(theme)
+                                ),
+                                border   = FilterChipDefaults.filterChipBorder(
+                                    enabled             = true,
+                                    selected            = fontFamily == fam,
+                                    borderColor         = readerHudOnSurface(theme).copy(alpha = 0.35f),
+                                    selectedBorderColor = readerHudOnSurface(theme).copy(alpha = 0.6f)
+                                )
                             )
                         }
                     }
@@ -797,7 +827,9 @@ private fun ThemeChip(
             enabled             = true,
             selected            = isSelected,
             borderColor         = fgColor.copy(alpha = 0.3f),
-            selectedBorderColor = MaterialTheme.colorScheme.primary,
+            // Gold reads on every theme chip (white, sepia, navy, paper),
+            // unlike the phone's own accent colour.
+            selectedBorderColor = Color(0xFFC9A227),
             selectedBorderWidth = 2.dp
         ),
         modifier = modifier

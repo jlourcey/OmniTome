@@ -27,6 +27,8 @@ OmniTome is an Android e-reader that connects straight to your own **Calibre Con
 
 ## What's new in 2.1
 
+- Reader controls are readable on every phone: text, font buttons and sliders follow your reading theme instead of the phone's dark mode or wallpaper colours (2.1.1)
+- Books open straight away in your chosen theme and font (2.1.1)
 - The book page now stays visible while the reader controls are open
 - Shelves screen: titles and shelf buttons are readable in every theme
 
