@@ -173,9 +173,73 @@ interface BookDao {
     /**
      * Sets the Read status from inside OmniTome ("Mark as Read" / "Mark as Unread",
      * or reaching the last page). [dirty] = still needs sending to Calibre.
+     *
+     * Also keeps the Times Read count:
+     *  - Unread → Read adds one finish waiting to go to Calibre ([BookEntity.pendingReads]).
+     *  - Read → Unread before that finish was sent takes it back (a mis-tap).
      */
-    @Query("UPDATE books SET isRead = :isRead, readAt = :readAt, readStatusDirty = :dirty WHERE id = :id")
+    @Query("""
+        UPDATE books
+        SET isRead          = :isRead,
+            readAt          = :readAt,
+            readStatusDirty = :dirty,
+            pendingReads    = CASE
+                WHEN :isRead = 1 AND isRead = 0 THEN pendingReads + 1
+                WHEN :isRead = 0 AND isRead = 1 AND pendingReads > 0 THEN pendingReads - 1
+                ELSE pendingReads
+            END
+        WHERE id = :id
+    """)
     suspend fun setReadStatus(id: String, isRead: Boolean, readAt: Long?, dirty: Boolean)
+
+    /**
+     * Called after Calibre accepted a new Times Read value:
+     * [newTimesRead] is what Calibre now holds, and [sentPending] of the
+     * waiting finishes were included in it.
+     */
+    @Query("""
+        UPDATE books
+        SET timesRead    = :newTimesRead,
+            pendingReads = MAX(pendingReads - :sentPending, 0)
+        WHERE id = :id
+    """)
+    suspend fun applyTimesReadPushed(id: String, newTimesRead: Int, sentPending: Int)
+
+    /** Copies Calibre's Times Read count during library sync. */
+    @Query("""
+        UPDATE books
+        SET timesRead = :timesRead
+        WHERE calibreBookId = :calibreBookId
+          AND (libraryKey = :libraryKey OR libraryKey IS NULL)
+    """)
+    suspend fun applyCalibreTimesRead(libraryKey: String, calibreBookId: Int, timesRead: Int)
+
+    // ── Star rating ───────────────────────────────────────────────────────────
+
+    /** Sets the rating from inside OmniTome. [dirty] = still needs sending to Calibre. */
+    @Query("UPDATE books SET rating = :rating, ratingDirty = :dirty WHERE id = :id")
+    suspend fun setRating(id: String, rating: Int?, dirty: Boolean)
+
+    /** Called after Calibre accepted the rating — only if it wasn't changed again meanwhile. */
+    @Query("UPDATE books SET ratingDirty = 0 WHERE id = :id AND rating IS :sentRating")
+    suspend fun clearRatingDirty(id: String, sentRating: Int?)
+
+    /** Calibre-linked books whose rating changed in OmniTome and hasn't reached Calibre. */
+    @Query("SELECT * FROM books WHERE ratingDirty = 1 AND calibreBookId IS NOT NULL")
+    suspend fun getBooksWithUnsyncedRating(): List<BookEntity>
+
+    /**
+     * Copies Calibre's rating during library sync — skipped while our own
+     * change is still waiting to be sent.
+     */
+    @Query("""
+        UPDATE books
+        SET rating = :rating
+        WHERE calibreBookId = :calibreBookId
+          AND (libraryKey = :libraryKey OR libraryKey IS NULL)
+          AND ratingDirty = 0
+    """)
+    suspend fun applyCalibreRating(libraryKey: String, calibreBookId: Int, rating: Int?)
 
     /** Called after Calibre accepted the read status — stops it being sent again. */
     @Query("UPDATE books SET readStatusDirty = 0 WHERE id = :id AND isRead = :sentIsRead")

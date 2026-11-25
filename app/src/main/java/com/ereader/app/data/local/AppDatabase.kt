@@ -39,7 +39,7 @@ import com.ereader.app.data.local.entity.ReadingDayEntity
         AnnotationTombstoneEntity::class,
         ReadingDayEntity::class
     ],
-    version      = 8,
+    version      = 9,
     exportSchema = false
 )
 @TypeConverters(Converters::class)

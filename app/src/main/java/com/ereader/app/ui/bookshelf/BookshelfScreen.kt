@@ -83,6 +83,18 @@ fun BookshelfScreen(
     // Reading streak + books finished this year
     val readingStreak    by viewModel.readingStreak.collectAsStateWithLifecycle()
     val finishedThisYear by viewModel.finishedThisYear.collectAsStateWithLifecycle()
+    // Smart Shelves (saved Calibre searches) and the New / Edit popup
+    val smartShelves     by viewModel.smartShelves.collectAsStateWithLifecycle()
+    val shelfEditor      by viewModel.shelfEditor.collectAsStateWithLifecycle()
+
+    shelfEditor?.let { editor ->
+        SmartShelfDialog(
+            state     = editor,
+            onDismiss = viewModel::onCloseShelfEditor,
+            onSave    = viewModel::onSaveShelf,
+            onDelete  = viewModel::onDeleteShelf
+        )
+    }
 
     // Regular views: 4/5/6 columns by screen width
     // Series view: 3 columns so the stacked-cover bundles have room to breathe
@@ -137,6 +149,15 @@ fun BookshelfScreen(
                     )
                 }
 
+                // ── Smart Shelves ─────────────────────────────────────────────
+                SmartShelfBar(
+                    shelves    = smartShelves,
+                    selectedId = uiState.selectedShelf?.id,
+                    onSelect   = viewModel::onShelfSelected,
+                    onNew      = { viewModel.onOpenShelfEditor(null) },
+                    onEdit     = { viewModel.onOpenShelfEditor(it) }
+                )
+
                 // ── Sort order chips ──────────────────────────────────────────
                 SortOrderBar(
                     current   = uiState.sortOrder,
@@ -147,6 +168,8 @@ fun BookshelfScreen(
                 // ── Main content ──────────────────────────────────────────────
                 when {
                     uiState.isLoading        -> FullScreenLoading()
+                    uiState.items.isEmpty() && uiState.selectedShelf != null ->
+                        EmptyShelfPlaceholder(uiState.selectedShelf!!)
                     uiState.items.isEmpty()  -> EmptyLibraryPlaceholder(
                         sortOrder   = uiState.sortOrder,
                         onSyncClick = viewModel::onSyncRequested
@@ -165,7 +188,8 @@ fun BookshelfScreen(
                         onReadOffline      = viewModel::onReadOffline,
                         onRemoveDownload   = viewModel::onRemoveDownload,
                         onSyncNotes        = viewModel::onSyncNotes,
-                        onMarkRead         = viewModel::onMarkRead
+                        onMarkRead         = viewModel::onMarkRead,
+                        onRate             = viewModel::onRate
                     )
                 }
             }
@@ -439,7 +463,8 @@ private fun BookshelfGrid(
     onReadOffline: (Book) -> Unit = {},
     onRemoveDownload: (Book, Boolean) -> Unit = { _, _ -> },
     onSyncNotes: (Book) -> Unit = {},
-    onMarkRead: (Book, Boolean, Boolean) -> Unit = { _, _, _ -> }
+    onMarkRead: (Book, Boolean, Boolean) -> Unit = { _, _, _ -> },
+    onRate: (Book, Int?) -> Unit = { _, _ -> }
 ) {
     val rows = remember(items, columnCount) { items.chunked(columnCount) }
 
@@ -476,7 +501,8 @@ private fun BookshelfGrid(
                                 onReadOffline     = { onReadOffline(item.book) },
                                 onRemoveDownload  = { syncFirst -> onRemoveDownload(item.book, syncFirst) },
                                 onSyncNotes       = { onSyncNotes(item.book) },
-                                onMarkRead        = { read, today -> onMarkRead(item.book, read, today) }
+                                onMarkRead        = { read, today -> onMarkRead(item.book, read, today) },
+                                onRate            = { stars -> onRate(item.book, stars) }
                             )
                             is ShelfItem.SeriesBundle -> SeriesBundleCard(
                                 bundle   = item,
@@ -744,19 +770,36 @@ private fun BookCoverItem(
     onReadOffline: () -> Unit = {},
     onRemoveDownload: (syncFirst: Boolean) -> Unit = {},
     onSyncNotes: () -> Unit = {},
-    onMarkRead: (read: Boolean, finishedToday: Boolean) -> Unit = { _, _ -> }
+    onMarkRead: (read: Boolean, finishedToday: Boolean) -> Unit = { _, _ -> },
+    onRate: (stars: Int?) -> Unit = {}
 ) {
     var showContextMenu  by remember { mutableStateOf(false) }
     var showDeleteDialog by remember { mutableStateOf(false) }
     var showRemoveDownloadDialog by remember { mutableStateOf(false) }
     var showMarkReadDialog by remember { mutableStateOf(false) }
+    var showRatingDialog by remember { mutableStateOf(false) }
+    var ratingAfterFinish by remember { mutableStateOf(false) }
 
     // ── Mark as Read popup ("when did you finish it?") ────────────────────────
+    // Afterwards, offer to rate the book (skipped if it already has a rating).
     if (showMarkReadDialog) {
         MarkAsReadDialog(
             book      = book,
             onDismiss = { showMarkReadDialog = false },
-            onConfirm = { today -> onMarkRead(true, today) }
+            onConfirm = { today ->
+                onMarkRead(true, today)
+                if (book.rating == null) { ratingAfterFinish = true; showRatingDialog = true }
+            }
+        )
+    }
+
+    // ── Rate Book popup ───────────────────────────────────────────────────────
+    if (showRatingDialog) {
+        RatingDialog(
+            book         = book,
+            justFinished = ratingAfterFinish,
+            onDismiss    = { showRatingDialog = false; ratingAfterFinish = false },
+            onSave       = onRate
         )
     }
 
@@ -830,6 +873,14 @@ private fun BookCoverItem(
                     leadingIcon = { Icon(Icons.Default.TaskAlt, contentDescription = null) }
                 )
             }
+            // "Rate Book" — 1 to 5 stars, synced with Calibre's Rating
+            DropdownMenuItem(
+                text        = {
+                    Text(if (book.rating != null) "Rate Book  ${starText(book.rating)}" else "Rate Book")
+                },
+                onClick     = { showContextMenu = false; ratingAfterFinish = false; showRatingDialog = true },
+                leadingIcon = { Icon(Icons.Default.StarOutline, contentDescription = null) }
+            )
             // "Read Offline" — saves a Calibre/Drive book onto the phone.
             // Hidden for imported books (they already live on the phone),
             // for books already saved, and while a save is in progress.

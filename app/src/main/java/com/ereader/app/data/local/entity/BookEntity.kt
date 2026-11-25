@@ -135,6 +135,30 @@ data class BookEntity(
     @ColumnInfo(defaultValue = "0")
     val readStatusDirty: Boolean = false,
 
+    // ── Times Read ────────────────────────────────────────────────────────────
+    /**
+     * How many times the book has been read, as last copied from Calibre's
+     * "Times Read" column (0 if the library has no such column).
+     */
+    @ColumnInfo(defaultValue = "0")
+    val timesRead: Int         = 0,
+
+    /**
+     * Finishes recorded in OmniTome that haven't been added to Calibre's
+     * "Times Read" count yet. Sent along with the Read status.
+     * The number shown to the user is [timesRead] + [pendingReads].
+     */
+    @ColumnInfo(defaultValue = "0")
+    val pendingReads: Int      = 0,
+
+    // ── Star rating ───────────────────────────────────────────────────────────
+    /** 1–5 stars, or NULL for no rating. Synced with Calibre's built-in Rating. */
+    val rating: Int?           = null,
+
+    /** True when the rating was changed in OmniTome and hasn't reached Calibre yet. */
+    @ColumnInfo(defaultValue = "0")
+    val ratingDirty: Boolean   = false,
+
     // ── Housekeeping ──────────────────────────────────────────────────────────
     val addedAt: Long          = System.currentTimeMillis(),
     val updatedAt: Long        = System.currentTimeMillis()
