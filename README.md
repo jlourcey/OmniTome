@@ -10,9 +10,25 @@
   <a href="https://github.com/jlourcey/OmniTome/releases/latest"><b>⬇ Download the latest APK</b></a>
 </p>
 
+<div align="center">
+<table>
+  <tr>
+    <td align="center"><img src="screenshots/library.png" width="200" alt="Your Calibre library"><br><sub>Your Calibre library</sub></td>
+    <td align="center"><img src="screenshots/reader.png" width="200" alt="Reading, with the page slider"><br><sub>Reading, with the page slider</sub></td>
+    <td align="center"><img src="screenshots/smart-shelf.png" width="200" alt="Smart Shelves"><br><sub>Smart Shelves</sub></td>
+    <td align="center"><img src="screenshots/finished-rating.png" width="200" alt="Rate it when you finish"><br><sub>Rate it when you finish</sub></td>
+  </tr>
+</table>
+</div>
+
 ---
 
 OmniTome is an Android e-reader that connects straight to your own **Calibre Content Server**. No third-party accounts and no cloud service: your books stay on your server and your phone.
+
+## What's new in 2.1
+
+- The book page now stays visible while the reader controls are open
+- Shelves screen: titles and shelf buttons are readable in every theme
 
 ## What's new in 2.0
 
@@ -55,6 +71,16 @@ OmniTome is an Android e-reader that connects straight to your own **Calibre Con
 - **Library tools**: series grouping, search with tag filters, and a Favorites shelf
 - **Tablet two-page layout**
 
+## More screenshots
+
+<table>
+  <tr>
+    <td align="center"><img src="screenshots/dictionary.png" width="200" alt="Offline dictionary"><br><sub>Offline dictionary</sub></td>
+    <td align="center"><img src="screenshots/rate-book.png" width="200" alt="Rate, mark read, add to shelves"><br><sub>Rate, mark read, add to shelves</sub></td>
+    <td align="center"><img src="screenshots/read-tracking.png" width="200" alt="Choose your Calibre columns"><br><sub>Choose your Calibre columns</sub></td>
+  </tr>
+</table>
+
 ## Requirements
 
 - Android **8.0** or newer
@@ -79,6 +105,13 @@ To update, download the newer APK from the Releases page and install it over the
 1. Open OmniTome and enter your Calibre server address, for example `http://192.168.1.100:8080`.
 2. Enter your Calibre username and password (if your server uses one).
 3. Pick which library to show. You can switch later in **Settings**.
+
+<table>
+  <tr>
+    <td align="center"><img src="screenshots/welcome.png" width="200" alt="Welcome and guided tour"><br><sub>Welcome and guided tour</sub></td>
+    <td align="center"><img src="screenshots/connect.png" width="200" alt="Connect to your Calibre server"><br><sub>Connect to your Calibre server</sub></td>
+  </tr>
+</table>
 
 ## Building from source
 

@@ -1456,6 +1456,9 @@ class ReaderActivity : AppCompatActivity() {
                 viewModel.hudVisible.collect { visible ->
                     // Status/navigation bars show with the reader controls, hide with them.
                     if (visible) showSystemBars() else hideSystemBars()
+                    // See-through while the controls are open so the page stays visible;
+                    // solid theme colour otherwise (needed behind the page-curl animation).
+                    applyHudBackground(hudView, visible)
                     if (visible) {
                         hudView.bringToFront()
                     } else {
@@ -1482,16 +1485,8 @@ class ReaderActivity : AppCompatActivity() {
         // covers those regions.
         lifecycleScope.launch {
             repeatOnLifecycle(Lifecycle.State.STARTED) {
-                viewModel.readerThemePref.collect { theme ->
-                    val hex = when (theme) {
-                        ReaderTheme.DAY   -> "#ffffff"
-                        ReaderTheme.NIGHT -> "#1a1a1a"
-                        ReaderTheme.SEPIA -> "#f4ecd8"
-                        ReaderTheme.PAPER -> "#f0ebe0"
-                    }
-                    try {
-                        hudView.setBackgroundColor(android.graphics.Color.parseColor(hex))
-                    } catch (_: Exception) {}
+                viewModel.readerThemePref.collect {
+                    applyHudBackground(hudView, viewModel.hudVisible.value)
                 }
             }
         }
@@ -1517,6 +1512,26 @@ class ReaderActivity : AppCompatActivity() {
                 }
             }
         }
+    }
+
+    /**
+     * The controls layer's own background: transparent while the controls are
+     * open (so the page shows through), the reader theme's colour otherwise.
+     */
+    private fun applyHudBackground(hudView: View, controlsOpen: Boolean) {
+        if (controlsOpen) {
+            hudView.setBackgroundColor(android.graphics.Color.TRANSPARENT)
+            return
+        }
+        val hex = when (viewModel.readerThemePref.value) {
+            ReaderTheme.DAY   -> "#ffffff"
+            ReaderTheme.NIGHT -> "#1a1a1a"
+            ReaderTheme.SEPIA -> "#f4ecd8"
+            ReaderTheme.PAPER -> "#f0ebe0"
+        }
+        try {
+            hudView.setBackgroundColor(android.graphics.Color.parseColor(hex))
+        } catch (_: Exception) {}
     }
 
     // ── Loading / error states ────────────────────────────────────────────────

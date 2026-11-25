@@ -134,7 +134,10 @@ fun ReaderControlsHud(
             // HUD is visible (or during a brief page-curl lift) this colour
             // fills any area that Compose leaves transparent — most critically
             // the status-bar and navigation-bar strips at the edges.
-            .background(readerBgOpaque)
+            // While the controls are open the page must stay visible underneath,
+            // so the background is see-through then (the top and bottom bars
+            // have their own backgrounds and cover the status/navigation bars).
+            .background(if (hudVisible) Color.Transparent else readerBgOpaque)
     ) {
 
         // Page curl animation — drawn first (behind HUD bars) so the bars can
@@ -153,7 +156,7 @@ fun ReaderControlsHud(
             modifier = Modifier.align(Alignment.TopCenter)
         ) {
             Surface(
-                color           = readerHudSurface(theme),
+                color           = readerHudSurface(theme).copy(alpha = 1f),   // solid: the page shows behind the bars
                 contentColor    = readerHudOnSurface(theme),
                 shadowElevation = 4.dp,
                 modifier        = Modifier.fillMaxWidth().controlArea(viewModel, "top_bar")
@@ -292,7 +295,7 @@ fun ReaderControlsHud(
             modifier = Modifier.align(Alignment.BottomCenter)
         ) {
             Surface(
-                color           = readerHudSurface(theme),
+                color           = readerHudSurface(theme).copy(alpha = 1f),   // solid: the page shows behind the bars
                 contentColor    = readerHudOnSurface(theme),
                 shadowElevation = 8.dp,
                 modifier        = Modifier.fillMaxWidth().controlArea(viewModel, "bottom_bar")

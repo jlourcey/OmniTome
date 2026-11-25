@@ -215,13 +215,14 @@ fun FavoritesScreen(
                                 else                        -> uiState.selectedShelf?.name ?: "Shelves"
                             },
                             style      = MaterialTheme.typography.titleMedium,
-                            fontWeight = FontWeight.Bold
+                            fontWeight = FontWeight.Bold,
+                            color      = Color.White
                         )
                         if (uiState.books.isNotEmpty()) {
                             Text(
                                 text  = "${uiState.books.size} book${if (uiState.books.size == 1) "" else "s"}",
                                 style = MaterialTheme.typography.labelSmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                                color = Color.White.copy(alpha = 0.65f)
                             )
                         }
                     }
@@ -246,7 +247,16 @@ fun FavoritesScreen(
                         selected    = uiState.isFavorites,
                         onClick     = { viewModel.select(null) },
                         label       = { Text("Favorites") },
-                        leadingIcon = { Icon(Icons.Default.Favorite, contentDescription = null, modifier = Modifier.size(16.dp)) }
+                        leadingIcon = { Icon(Icons.Default.Favorite, contentDescription = null, modifier = Modifier.size(16.dp)) },
+                        // The Shelves screen is always navy, so unselected text must be light.
+                        colors      = FilterChipDefaults.filterChipColors(
+                            labelColor       = Color.White,
+                            iconColor        = Color(0xFFDDBB3A)
+                        ),
+                        border      = FilterChipDefaults.filterChipBorder(
+                            enabled = true, selected = uiState.isFavorites,
+                            borderColor = Color.White.copy(alpha = 0.35f)
+                        )
                     )
                 }
                 items(uiState.shelves, key = { it.id }) { shelf ->
@@ -281,6 +291,11 @@ fun FavoritesScreen(
                     AssistChip(
                         onClick     = { showNewShelf = true },
                         label       = { Text("New shelf") },
+                        colors      = AssistChipDefaults.assistChipColors(
+                            labelColor       = Color.White,
+                            leadingIconContentColor = Color(0xFFDDBB3A)
+                        ),
+                        border      = AssistChipDefaults.assistChipBorder(enabled = true, borderColor = Color.White.copy(alpha = 0.35f)),
                         leadingIcon = { Icon(Icons.Default.Add, contentDescription = null, modifier = Modifier.size(16.dp)) }
                     )
                 }
@@ -288,6 +303,11 @@ fun FavoritesScreen(
                     AssistChip(
                         onClick     = { viewModel.openSmartEditor(null) },
                         label       = { Text("Smart shelf") },
+                        colors      = AssistChipDefaults.assistChipColors(
+                            labelColor       = Color.White,
+                            leadingIconContentColor = Color(0xFFDDBB3A)
+                        ),
+                        border      = AssistChipDefaults.assistChipBorder(enabled = true, borderColor = Color.White.copy(alpha = 0.35f)),
                         leadingIcon = { Icon(Icons.Default.AutoAwesome, contentDescription = null, modifier = Modifier.size(16.dp)) }
                     )
                 }
@@ -387,7 +407,7 @@ private fun ShelfChip(label: String, selected: Boolean, onClick: () -> Unit, onL
     Surface(
         shape  = shape,
         color  = if (selected) MaterialTheme.colorScheme.secondaryContainer else Color.Transparent,
-        border = if (selected) null else androidx.compose.foundation.BorderStroke(1.dp, MaterialTheme.colorScheme.outline),
+        border = if (selected) null else androidx.compose.foundation.BorderStroke(1.dp, Color.White.copy(alpha = 0.35f)),
         modifier = Modifier
             .height(32.dp)
             .clip(shape)
@@ -395,7 +415,7 @@ private fun ShelfChip(label: String, selected: Boolean, onClick: () -> Unit, onL
     ) {
         Box(Modifier.padding(horizontal = 12.dp), contentAlignment = Alignment.Center) {
             Text(label, style = MaterialTheme.typography.labelLarge,
-                color = if (selected) MaterialTheme.colorScheme.onSecondaryContainer else MaterialTheme.colorScheme.onSurface)
+                color = if (selected) MaterialTheme.colorScheme.onSecondaryContainer else Color.White)
         }
     }
 }
